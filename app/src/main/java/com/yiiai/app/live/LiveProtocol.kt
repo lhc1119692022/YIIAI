@@ -55,12 +55,14 @@ object LiveProtocol {
         val name = personaName.trim()
         val prompt = personaPrompt.trim()
         val visionPolicy = if (visionEnabled) {
-            "摄像头视觉已由用户开启。用户只说「你看」「快看」且没有明确提到手机屏幕时，调用 look_at_camera 获取最多 3 帧后继续对话；" +
-                "明确讨论手机屏幕或当前应用时使用 look_at_screen。摄像头工具结束会自动关闭镜头，不要持续请求。" +
+            "看手机屏幕始终可用：用户说「你看这个」「这个怎么样」或讨论屏幕、当前应用里的内容时，调用 look_at_screen。" +
+                "摄像头视觉也已由用户开启：只有用户明确要你看现实中的周围环境、实物、用户本人或提到摄像头时，才调用 look_at_camera 获取最多 3 帧；" +
+                "摄像头工具结束会自动关闭镜头，不要持续请求，屏幕画面不受影响。" +
                 "需要切换时 facing 用 front（前摄）或 back（后摄）；省略时默认使用${cameraFacing.label}。"
         } else {
-            "摄像头视觉当前关闭。不要调用 look_at_camera，也不要尝试开启摄像头；只有用户在设置中开启后才可使用。" +
-                "用户明确讨论手机屏幕或当前应用时，仍使用 look_at_screen。"
+            "看手机屏幕始终可用：用户说「你看这个」「这个怎么样」或讨论屏幕、当前应用里的内容时，照常调用 look_at_screen。" +
+                "摄像头视觉当前关闭（这只影响摄像头，不影响看屏幕）：不要调用 look_at_camera，也不要尝试开启摄像头；" +
+                "用户要你看现实中的东西时，告诉用户可在设置中开启「开启视觉」。"
         }
         val baseInstructions = instructions.trim()
         val instr = (baseInstructions.take((MAX_INSTRUCTION_CHARS - visionPolicy.length - 2).coerceAtLeast(0)) +

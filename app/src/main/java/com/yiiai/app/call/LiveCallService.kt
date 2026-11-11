@@ -106,10 +106,24 @@ class LiveCallService : Service() {
         try {
             ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
         } catch (t: Throwable) {
-            Log.e(TAG, "startForeground failed", t)
-            stopSelfSafely()
+            Log.e(TAG, "startForeground failed type=$type", t)
+            // 摄像头类型可能被系统拒绝（后台启动、权限变化等），退回只用麦克风，不能让整通电话挂掉。
+            val micOnly = microphoneOnlyType()
+            if (type == micOnly) {
+                stopSelfSafely()
+                return
+            }
+            try {
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, micOnly)
+            } catch (t2: Throwable) {
+                Log.e(TAG, "startForeground (microphone only) failed", t2)
+                stopSelfSafely()
+            }
         }
     }
+
+    private fun microphoneOnlyType(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
 
     private fun foregroundServiceType(): Int {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return 0

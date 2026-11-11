@@ -45,6 +45,7 @@ class PhoneToolRunner(
             Tools.WATCH -> {
                 val seconds = args.num("seconds")?.toInt()?.coerceIn(30, 600) ?: 180
                 startWatching(seconds)
+                sendEvent(com.yiiai.app.live.LiveProtocol.videoStreamFocus("screen"))
                 // 先把当前这一帧补上，模型不用等下一轮刷新。
                 val (bytes, _) = svc!!.screenshot(maxSide = 1024, quality = 80)
                 bytes?.let { sendScreenFrame(it) }
@@ -130,6 +131,9 @@ class PhoneToolRunner(
             captureCamera(facing, sendCameraFrame)
         } finally {
             sendEvent(com.yiiai.app.live.LiveProtocol.videoState("camera", false))
+            // 摄像头只是临时看一眼，结束后必须把主画面还回去，否则服务端会一直盯着已关闭的摄像头，
+            // 之后的屏幕帧（0x02）都看不到。
+            sendEvent(com.yiiai.app.live.LiveProtocol.videoStreamFocus(if (isWatching()) "screen" else "auto"))
         }
         return if (count > 0) {
             "已通过${facing.label}摄像头发送 $count 帧画面，摄像头已经关闭。请根据刚收到的画面回应用户。"
@@ -143,6 +147,7 @@ class PhoneToolRunner(
         startWatching(180)
         // 协议要求先声明要发屏幕帧，否则服务端可能忽略这条 0x02。
         sendEvent(com.yiiai.app.live.LiveProtocol.videoState("screen", true))
+        sendEvent(com.yiiai.app.live.LiveProtocol.videoStreamFocus("screen"))
         kotlinx.coroutines.delay(120)
         val (bytes, reason) = svc.screenshot(maxSide = 1024, quality = 80)
         if (bytes == null) return reason

@@ -45,6 +45,7 @@ class ScreenStreamer(
             return
         }
         sendEvent(LiveProtocol.videoState("screen", true))
+        sendEvent(LiveProtocol.videoStreamFocus("screen"))
         job = scope.launch {
             onLog("屏幕画面已开启（约 ${1000 / intervalMs} 帧/秒）")
             var failures = 0
