@@ -61,8 +61,12 @@ class MainActivity : ComponentActivity() {
     private val debugShowOverlay: Boolean
         get() = debugExtras?.getBooleanExtra("show_overlay", false) == true
 
+    /** 设计实验室开关：onNewIntent 可以覆盖，不用重启 App 就能进出。 */
+    private val designLabOverride = androidx.compose.runtime.mutableStateOf<Boolean?>(null)
+
     private val debugDesignLab: Boolean
-        get() = debugExtras?.getBooleanExtra("design_lab", false) == true
+        get() = designLabOverride.value
+            ?: (debugExtras?.getBooleanExtra("design_lab", false) == true)
 
     private val debugDesignPage: Int
         get() = debugExtras?.getIntExtra("design_page", 0) ?: 0
@@ -169,7 +173,7 @@ class MainActivity : ComponentActivity() {
                         onToggleOverlay = ::toggleOverlay,
                         startInSettings = startInSettings,
                         initialSettingsPage = initialSettingsPage,
-                        designLab = debugDesignLab,
+                        designLab = designLabOverride.value ?: debugDesignLab,
                         designLabPage = debugDesignPage,
                     )
                 }
@@ -249,6 +253,9 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         intent.getStringExtra("probe_phone")?.let { runPhoneProbe(it) }
         // 已在运行时的重新启动也要能触发自动通话，方便验证。
+        if (intent.hasExtra("design_lab")) {
+            designLabOverride.value = intent.getBooleanExtra("design_lab", false)
+        }
         if (intent.getBooleanExtra("auto_start", false)) startCall()
         intent.getStringExtra("probe_watch")?.let { seconds ->
             app.live.setWatching(true)

@@ -171,7 +171,10 @@ fun DeerMascot(
     @Suppress("UNUSED_PARAMETER") compact: Boolean = false,
 ) {
     val palette = LocalYiiPalette.current
-    val target = when (mode) {
+    // 聆听和「我在说」共用同一套效果：睁眼、竖耳、随音量起伏。
+    // 聆听时麦克风仍在采集环境声，所以光晕和树叶会跟着你的声音动。
+    val visual = if (mode == OrbMode.Listening) OrbMode.UserSpeaking else mode
+    val target = when (visual) {
         OrbMode.UserSpeaking, OrbMode.AssistantSpeaking -> level
         else -> 0f
     }
@@ -185,7 +188,7 @@ fun DeerMascot(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            tween(if (mode == OrbMode.Connecting) 720 else 2600, easing = FastOutSlowInEasing),
+            tween(if (visual == OrbMode.Connecting) 720 else 2600, easing = FastOutSlowInEasing),
             RepeatMode.Reverse,
         ),
         label = "deer-breath",
@@ -195,7 +198,7 @@ fun DeerMascot(
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
             tween(
-                when (mode) {
+                when (visual) {
                     OrbMode.Connecting -> 9000
                     OrbMode.Muted -> 90000
                     else -> 36000
@@ -211,7 +214,7 @@ fun DeerMascot(
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
             tween(
-                when (mode) {
+                when (visual) {
                     OrbMode.Connecting -> 420
                     OrbMode.AssistantSpeaking -> 900
                     else -> 2400
@@ -223,7 +226,7 @@ fun DeerMascot(
         label = "deer-sway",
     )
     val earMood by animateFloatAsState(
-        targetValue = when (mode) {
+        targetValue = when (visual) {
             OrbMode.Listening, OrbMode.UserSpeaking -> 9f
             OrbMode.Muted -> -12f
             OrbMode.Error -> -16f
@@ -233,7 +236,7 @@ fun DeerMascot(
         label = "deer-ear",
     )
     val tilt by animateFloatAsState(
-        targetValue = when (mode) {
+        targetValue = when (visual) {
             OrbMode.AssistantSpeaking -> 3f
             OrbMode.Muted -> -4f
             OrbMode.Listening, OrbMode.UserSpeaking -> -1.5f
@@ -244,11 +247,11 @@ fun DeerMascot(
         label = "deer-tilt",
     )
 
-    val glow = deerGlow(palette, mode)
-    val active = mode != OrbMode.Idle && mode != OrbMode.Muted
+    val glow = deerGlow(palette, visual)
+    val active = mode != OrbMode.Idle && visual != OrbMode.Muted
     val body = if (palette.isDark) DeerColors.body else DeerColors.bodyOnLight
     val ear = if (palette.isDark) DeerColors.ear else DeerColors.earOnLight
-    val swayAmount = when (mode) {
+    val swayAmount = when (visual) {
         OrbMode.Connecting -> 4f
         OrbMode.AssistantSpeaking -> 2.5f
         else -> 1.2f
@@ -287,7 +290,7 @@ fun DeerMascot(
                 orbit = orbit,
                 breath = breath,
                 level = smooth,
-                energy = when (mode) {
+                energy = when (visual) {
                     OrbMode.Muted -> 0.15f
                     OrbMode.Idle -> 0.45f
                     else -> 1f
@@ -299,7 +302,7 @@ fun DeerMascot(
                     ear = ear,
                     antler = DeerColors.antler,
                     ink = DeerColors.ink,
-                    eyes = mode.toDeerEyes(),
+                    eyes = visual.toDeerEyes(),
                     earAngle = earMood + sway * swayAmount,
                     antlerAngle = sway * swayAmount * 0.5f,
                 )
