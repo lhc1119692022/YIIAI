@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">YIIAI</string>
+    <string name="phone_use_description">开启后，YIIAI才能看到你当前停留的界面，并按你的要求点一下、滑一下、输入文字或打开应用。只有在你说话或主动要求时才会读取，截图只用于当次对话。</string>
+</resources>

@@ -1,0 +1,13 @@
+.gradle/
+.kotlin/
+build/
+/local.properties
+/.idea/
+*.iml
+.DS_Store
+/captures
+.externalNativeBuild
+.cxx
+
+# 本地参考资料（RikkaHub 浅克隆、设计探索稿），不入库
+/_refs/
