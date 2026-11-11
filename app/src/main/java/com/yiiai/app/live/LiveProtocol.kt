@@ -84,11 +84,11 @@ object LiveProtocol {
         putJsonObject("input_audio") {
             put("format", "pcm16")
         }
-        // 屏幕截图（看一眼）要能看清文字：长边 1024、质量 80。
-        // 默认 profile 只有 512 / 0.75，缩到那个尺寸会糊。
+        // 屏幕画面要能看清文字：长边 1024、质量 0.8。
+        // 注意服务端要求 jpeg_quality 在 0.1..1 之间，传 80 会被整条 media.configure 拒绝。
         putJsonObject("video") {
             put("max_long_side", 1024)
-            put("jpeg_quality", 80)
+            put("jpeg_quality", 0.8)
             put("interval_ms", 1000)
         }
         put("playback", "client")

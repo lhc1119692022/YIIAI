@@ -48,6 +48,7 @@ class ScreenStreamer(
         job = scope.launch {
             onLog("屏幕画面已开启（约 ${1000 / intervalMs} 帧/秒）")
             var failures = 0
+            var sent = 0
             while (isActive) {
                 // 自己的界面不推：用户看到的是YIIAI自己，发过去没有意义。
                 if (shouldStream()) {
@@ -58,8 +59,12 @@ class ScreenStreamer(
                         } else {
                             val (bytes, why) = svc.screenshot(maxSide = maxSide, quality = 70)
                             if (bytes != null) {
-                                sendFrame(bytes)
+                                val ok = sendFrame(bytes)
                                 failures = 0
+                                sent++
+                                if (sent % 5 == 1) {
+                                    Log.d(TAG, "frame#$sent ${bytes.size / 1024}KB sent=$ok top=${ForegroundApp.current(appContext)}")
+                                }
                             } else {
                                 // 连续失败多半页面禁止截屏，歇一会儿再试，别刷屏。
                                 if (failures++ == 3) onLog("屏幕截图失败：$why")

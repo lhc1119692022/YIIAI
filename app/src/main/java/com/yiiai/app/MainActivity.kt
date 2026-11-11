@@ -101,25 +101,7 @@ class MainActivity : ComponentActivity() {
                 app.settings.update { it.copy(apiKey = key.trim()) }
             }
         }
-        debugExtras?.getStringExtra("probe_phone")?.let { what ->
-            // 调试：无障碍自检（read / shot / tap / key）。
-            lifecycleScope.launch {
-                kotlinx.coroutines.delay(1500)
-                val svc = com.yiiai.app.phone.PhoneUseService.instance
-                android.util.Log.i("YIIAI.PhoneUse", "ready=${svc != null} enabled=${com.yiiai.app.phone.PhoneUse.isEnabled(this@MainActivity)}")
-                if (svc != null) {
-                    when (what) {
-                        "read" -> android.util.Log.i("YIIAI.PhoneUse", "UI:\n" + svc.dumpUi())
-                        "shot" -> {
-                            val (bytes, why) = svc.screenshot()
-                            android.util.Log.i("YIIAI.PhoneUse", "shot=${bytes?.size ?: -1} $why")
-                        }
-                        "tap" -> android.util.Log.i("YIIAI.PhoneUse", "tap=" + svc.tap(720f, 1600f))
-                        "key" -> android.util.Log.i("YIIAI.PhoneUse", "back=" + svc.pressBack())
-                    }
-                }
-            }
-        }
+        debugExtras?.getStringExtra("probe_phone")?.let { runPhoneProbe(it) }
         debugExtras?.getStringExtra("probe_voice")?.let { id ->
             // 调试：用已保存的 Key 查一次音色名，结果和原始响应都打到 logcat（YIIAI.Voice）。
             lifecycleScope.launch {
@@ -192,6 +174,85 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+    }
+
+    /**
+     * 调试用无障碍自检（release 不可达）：
+     * - read 读控件树；shot 截一张；tap 点一下；key 按返回；
+     * - apps 列已安装应用；
+     * - rec 连续截图 15 秒，每 2 秒一张，用来验证「切到别的 App 也能截到画面」。
+     */
+    private fun runPhoneProbe(what: String) {
+        lifecycleScope.launch {
+            kotlinx.coroutines.delay(1200)
+            val svc = com.yiiai.app.phone.PhoneUseService.instance
+            android.util.Log.i(
+                "YIIAI.PhoneUse",
+                "ready=${svc != null} enabled=${com.yiiai.app.phone.PhoneUse.isEnabled(this@MainActivity)} mode=$what",
+            )
+            if (what == "rec") {
+                repeat(8) { i ->
+                    // 第 2 轮把淘宝拉到前台，验证切到别的 App 后仍能截到画面。
+                    if (i == 1) com.yiiai.app.phone.PhoneUse.launchApp(this@MainActivity, "淘宝")
+                    val shot = com.yiiai.app.phone.PhoneUseService.instance
+                    if (shot == null) {
+                        android.util.Log.i("YIIAI.PhoneUse", "rec[$i] service gone")
+                    } else {
+                        val top = com.yiiai.app.phone.ForegroundApp.current(this@MainActivity)
+                        val (bytes, why) = shot.screenshot()
+                        android.util.Log.i(
+                            "YIIAI.PhoneUse",
+                            "rec[$i] top=$top bytes=${bytes?.size ?: -1} $why",
+                        )
+                    }
+                    kotlinx.coroutines.delay(2000)
+                }
+                return@launch
+            }
+            if (what == "save") {
+                // 先等 6 秒，给外部把别的 App 拉到前台，再截。
+                kotlinx.coroutines.delay(6000)
+                // 存一份到外部目录，方便 pull 出来肉眼确认不是黑图。
+                val (bytes, why) = svc?.screenshot() ?: (null to "no service")
+                if (bytes != null) {
+                    val f = java.io.File(getExternalFilesDir(null), "shot.jpg")
+                    f.writeBytes(bytes)
+                    android.util.Log.i("YIIAI.PhoneUse", "saved ${f.absolutePath} ${bytes.size}B")
+                } else {
+                    android.util.Log.i("YIIAI.PhoneUse", "save failed: $why")
+                }
+                return@launch
+            }
+            if (what == "apps") {
+                val apps = com.yiiai.app.phone.PhoneUse.launchableApps(this@MainActivity)
+                android.util.Log.i("YIIAI.PhoneUse", "apps=${apps.size} :: " + apps.take(12).joinToString { it.first })
+                return@launch
+            }
+            if (svc == null) return@launch
+            when (what) {
+                "read" -> android.util.Log.i("YIIAI.PhoneUse", "UI:\n" + svc.dumpUi())
+                "shot" -> {
+                    val (bytes, why) = svc.screenshot()
+                    android.util.Log.i("YIIAI.PhoneUse", "shot=${bytes?.size ?: -1} $why")
+                }
+                "tap" -> android.util.Log.i("YIIAI.PhoneUse", "tap=" + svc.tap(720f, 1600f))
+                "key" -> android.util.Log.i("YIIAI.PhoneUse", "back=" + svc.pressBack())
+            }
+        }
+    }
+
+    /** singleTask：App 已在运行时，`am start` 走这里而不是 onCreate，探针要能重复触发。 */
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        if (!BuildConfig.DEBUG) return
+        setIntent(intent)
+        intent.getStringExtra("probe_phone")?.let { runPhoneProbe(it) }
+        // 已在运行时的重新启动也要能触发自动通话，方便验证。
+        if (intent.getBooleanExtra("auto_start", false)) startCall()
+        intent.getStringExtra("probe_watch")?.let { seconds ->
+            app.live.setWatching(true)
+            android.util.Log.i("YIIAI.PhoneUse", "watch on=$seconds watching=${app.live.isWatching}")
         }
     }
 

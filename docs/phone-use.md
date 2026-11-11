@@ -47,6 +47,7 @@ App 内的引导：设置 → **屏幕与应用控制**，页面顶部会显示�
 
 - 用 `AccessibilityService.takeScreenshot()`（Android 11+），长边缩到 **1024**、JPEG 质量 **80**。
 - 格式通过 `media.configure.video` 提前声明；默认 profile 只有长边 512 / 质量 0.75，文字会糊。
+- **`jpeg_quality` 必须在 0.1–1 之间**（传 80 会让整条 `media.configure` 被服务端拒绝，音频配置也会一起失效）。
 - 发帧前先发 `video.state{source:"screen",enabled:true}`。
 - 截图只在内存里转成 JPEG 直接走 WebSocket，**不落盘**。
 
