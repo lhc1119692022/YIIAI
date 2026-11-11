@@ -21,7 +21,7 @@ import com.yiiai.app.live.isActive
  * 通话通知。
  *
  * 走 Android 16 的 Live Updates（setRequestPromotedOngoing + BigTextStyle），
- * HyperOS 3 会把它画进状态栏中间的超级岛：左边是小图标（YIIAI剪影），右边是 setShortCriticalText 的短文字。
+ * HyperOS 3 会把它画进状态栏中间的超级岛：左边是小图标（小鹿剪影），右边是 setShortCriticalText 的短文字。
  * 之前用的 miui.focus.* 私有字段需要厂商白名单，已移除；RikkaHub 用的也是这条公开路径。
  */
 object CallNotification {

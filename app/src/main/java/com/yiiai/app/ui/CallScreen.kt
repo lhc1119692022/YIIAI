@@ -47,6 +47,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -75,6 +76,7 @@ fun CallScreen(
     onToggleOverlay: () -> Unit = {},
     onEditPersona: () -> Unit = {},
     onAddPersona: () -> Unit = {},
+    onOpenPhoneUse: () -> Unit = {},
 ) {
     val palette = LocalYiiPalette.current
     val state by live.state.collectAsStateWithLifecycle()
@@ -83,6 +85,13 @@ fun CallScreen(
     val settings by settingsStore.state.collectAsStateWithLifecycle()
     val overlayMode by com.yiiai.app.overlay.OverlayService.mode.collectAsStateWithLifecycle()
     var showHistory by rememberSaveable { mutableStateOf(false) }
+    // 曾经开通过、现在被系统关掉了。
+    var a11yTick by remember { mutableStateOf(0) }
+    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) { a11yTick++; onPauseOrDispose { } }
+    val ctx = LocalContext.current
+    val a11yLost = remember(a11yTick, settings.phoneUseEverReady) {
+        com.yiiai.app.phone.PhoneUse.wasDisabled(ctx, settings.phoneUseEverReady)
+    }
     val inCall = state.phase.isActive
     val assistantName = settings.personaName.ifBlank { "YIIAI" }
 
@@ -176,6 +185,26 @@ fun CallScreen(
                             .padding(horizontal = 14.dp, vertical = 8.dp),
                     )
                 }
+            }
+        }
+
+        // 无障碍被系统关掉时，在顶部提醒一次（不挡操作，点一下直接去开）。
+        if (a11yLost) {
+            Row(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 84.dp, start = 16.dp, end = 16.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(palette.danger.copy(alpha = 0.14f))
+                    .clickable(onClick = onOpenPhoneUse)
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "无障碍已关闭 · YIIAI看不到屏幕了，点这里重新开启",
+                    color = palette.danger,
+                    fontSize = 12.sp,
+                )
             }
         }
 

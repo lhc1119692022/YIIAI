@@ -18,12 +18,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -197,7 +199,18 @@ private fun RootPage(
             ) {
                 Text(title, color = palette.text, fontSize = 15.sp)
                 Spacer(Modifier.weight(1f))
-                if (summary.isNotEmpty()) {
+                if (target == SettingsPage.PhoneUse) {
+                    // 无障碍这一行用胶囊滑块表示开关，比一行小字更清楚。
+                    val on = com.yiiai.app.phone.PhoneUse.isReady()
+                    Text(
+                        if (on) "开" else "关",
+                        color = palette.textDim,
+                        fontSize = 12.sp,
+                    )
+                    Spacer(Modifier.padding(start = 6.dp))
+                    CapsuleSwitch(checked = on)
+                    Spacer(Modifier.padding(start = 4.dp))
+                } else if (summary.isNotEmpty()) {
                     Text(
                         summary,
                         color = if (target == SettingsPage.ApiKey && settings.apiKey.isBlank()) palette.danger else palette.textDim,
@@ -812,7 +825,7 @@ private fun PhoneUsePage() {
             com.yiiai.app.phone.PhoneUse.openSettings(context)
         }
         Text(
-            "「YIIAI」需要无障碍权限才能看到你的屏幕、帮你点击和输入。" +
+            "YIIAI需要无障碍权限才能看到你的屏幕、帮你点击和输入。" +
                 "开启方式：系统设置 → 无障碍 → 已下载的应用 → YIIAI → 打开。",
             color = palette.textDim,
             fontSize = 12.sp,
@@ -948,5 +961,45 @@ private fun SecondaryAction(label: String, onClick: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Text(label, color = palette.text, fontSize = 14.sp)
+    }
+}
+
+/**
+ * 胶囊滑块：只表示开关状态，不自己切换（点整行进子页）。
+ * 关：灰色轨道、左边圆点；开：强调色轨道、右边圆点。
+ */
+@Composable
+private fun CapsuleSwitch(checked: Boolean, modifier: Modifier = Modifier) {
+    val palette = LocalYiiPalette.current
+    val track by androidx.compose.animation.animateColorAsState(
+        targetValue = if (checked) palette.accent else palette.surfaceRaised,
+        label = "capsule-track",
+    )
+    val knob by androidx.compose.animation.core.animateDpAsState(
+        targetValue = if (checked) 20.dp else 0.dp,
+        animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.7f),
+        label = "capsule-knob",
+    )
+    Box(
+        modifier
+            .size(width = 46.dp, height = 26.dp)
+            .clip(RoundedCornerShape(50))
+            .background(track)
+            .padding(2.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Box(
+            Modifier
+                .offset(x = knob)
+                .size(22.dp)
+                .clip(CircleShape)
+                .background(
+                    if (checked) {
+                        if (palette.isDark) androidx.compose.ui.graphics.Color(0xFF10140E) else androidx.compose.ui.graphics.Color.White
+                    } else {
+                        palette.textDim
+                    },
+                ),
+        )
     }
 }

@@ -204,6 +204,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        // 无障碍服务一旦成功连上就记一笔；之后若被系统关掉，要主动提示。
+        if (com.yiiai.app.phone.PhoneUse.isReady() && !app.settings.current.phoneUseEverReady) {
+            app.settings.update { it.copy(phoneUseEverReady = true) }
+        }
         // 回到界面：自动出现的灵动岛收起；用户主动开的悬浮球保留。
         if (OverlayService.mode.value == com.yiiai.app.overlay.OverlayMode.Island) OverlayService.hide(this)
     }

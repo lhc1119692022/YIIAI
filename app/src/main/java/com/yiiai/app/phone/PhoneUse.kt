@@ -42,6 +42,13 @@ object PhoneUse {
     fun canScreenshot(): Boolean =
         android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R
 
+    /**
+     * 曾经开通过、现在却被关掉了（多半是系统在某次重启或强杀后自动关闭）。
+     * 这时值得主动提醒用户，而不是等他用「看一眼」失败才发现。
+     */
+    fun wasDisabled(context: Context, everReady: Boolean): Boolean =
+        everReady && !isReady()
+
     /** 状态说明，用于设置页和通话中提示。 */
     fun statusText(context: Context): String = when {
         isReady() -> "已开启"

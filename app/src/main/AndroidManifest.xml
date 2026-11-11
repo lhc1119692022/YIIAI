@@ -65,7 +65,7 @@
                 android:value="floating voice assistant bubble" />
         </service>
 
-        <!-- YIIAI的眼睛和手：无障碍服务。用户需在系统设置中手动开启。 -->
+        <!-- YIIAI 的眼睛和手：无障碍服务。用户需在系统设置中手动开启。 -->
         <service
             android:name=".phone.PhoneUseService"
             android:exported="true"

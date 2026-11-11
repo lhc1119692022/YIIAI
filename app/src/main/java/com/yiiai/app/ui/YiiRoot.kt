@@ -50,6 +50,7 @@ fun YiiRoot(
                 settingsStore.addPersona()
                 settingsPage = "Persona"
             },
+            onOpenPhoneUse = { settingsPage = "PhoneUse" },
         )
     }
 }

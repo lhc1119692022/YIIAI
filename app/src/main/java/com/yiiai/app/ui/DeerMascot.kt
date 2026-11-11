@@ -31,7 +31,7 @@ import com.yiiai.app.ui.theme.LocalYiiPalette
 import com.yiiai.app.ui.theme.YiiPalette
 
 /**
- * 小鹿「YIIAI」头像（方案 A：3/4 侧脸）。
+ * 小鹿头像（方案 A：3/4 侧脸）。
  *
  * 只有头：实心叶耳、两枚小鹿角芽、口鼻朝左下的头型、闭眼和一颗鼻头。
  * 全部是实心块面，不靠线条撑轮廓；放在图标、悬浮球、灵动岛里都自带深色底板。

@@ -18,7 +18,7 @@ import java.io.ByteArrayOutputStream
 import kotlin.coroutines.resume
 
 /**
- * YIIAI的「眼睛」和「手」。
+ * YIIAI 的「眼睛」和「手」。
  *
  * 用无障碍服务做两件事：
  * 1. 看一眼：截图当前屏幕（takeScreenshot，API 30+），压成 JPEG 发给模型；
