@@ -133,7 +133,7 @@ fun SettingsScreen(
         }
 
         when (page) {
-            SettingsPage.Root -> RootPage(settings, onOpen = { go(it) })
+            SettingsPage.Root -> RootPage(settings, store, onOpen = { go(it) })
             SettingsPage.ApiKey -> ApiKeyPage(store)
             SettingsPage.Voice -> VoicePage(store)
             SettingsPage.Persona -> PersonaPage(store)
@@ -165,67 +165,290 @@ private fun pageTitle(page: SettingsPage) = when (page) {
 @Composable
 private fun RootPage(
     settings: com.yiiai.app.settings.AppSettings,
+    store: SettingsStore,
     onOpen: (SettingsPage) -> Unit,
 ) {
     val palette = LocalYiiPalette.current
     val context = LocalContext.current
-    // 顺序按使用频率排：先换声音和性格，再是记忆、外观、音质。
-    val rows = listOf(
-        Triple(SettingsPage.Voice, "音色", settings.allVoices().firstOrNull { it.id == settings.voiceId }?.label ?: "未选择"),
-        Triple(SettingsPage.Persona, "角色与人设", settings.personaName),
-        Triple(SettingsPage.Memory, "长期记忆", if (settings.sharedMemory) "所有角色共享" else "每个角色独立"),
-        Triple(SettingsPage.Appearance, "外观", ThemeMode.of(settings.themeModeKey).label),
-        Triple(SettingsPage.Audio, "通话音频", if (settings.speakerOn) "外放上" else "外放关"),
-        Triple(SettingsPage.ApiKey, "API Key", if (settings.apiKey.isBlank()) "未填写" else "已设置"),
-        Triple(SettingsPage.PhoneUse, "屏幕与应用控制", com.yiiai.app.phone.PhoneUse.statusText(context)),
-        Triple(SettingsPage.Storage, "存储与清理", "缓存与记录"),
-        Triple(SettingsPage.Log, "日志", "协议事件，排查用"),
-        Triple(SettingsPage.About, "关于", ""),
-    )
+    val theme = ThemeMode.of(settings.themeModeKey)
+
+    // 三组：连接、角色、数据
     LazyColumn(
         Modifier
             .fillMaxSize()
             .navigationBarsPadding(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        items(rows) { (target, title, summary) ->
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(palette.surface)
-                    .clickable { onOpen(target) }
-                    .padding(horizontal = 16.dp, vertical = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(title, color = palette.text, fontSize = 15.sp)
-                Spacer(Modifier.weight(1f))
-                if (target == SettingsPage.PhoneUse) {
-                    // 无障碍这一行用胶囊滑块表示开关，比一行小字更清楚。
-                    val on = com.yiiai.app.phone.PhoneUse.isReady()
-                    Text(
-                        if (on) "开" else "关",
-                        color = palette.textDim,
-                        fontSize = 12.sp,
-                    )
-                    Spacer(Modifier.padding(start = 6.dp))
-                    CapsuleSwitch(checked = on)
-                    Spacer(Modifier.padding(start = 4.dp))
-                } else if (summary.isNotEmpty()) {
-                    Text(
-                        summary,
-                        color = if (target == SettingsPage.ApiKey && settings.apiKey.isBlank()) palette.danger else palette.textDim,
-                        fontSize = 13.sp,
-                    )
-                    Spacer(Modifier.padding(start = 4.dp))
-                }
-                Icon(
-                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = null,
-                    tint = palette.textDim,
-                    modifier = Modifier.size(20.dp),
+        // ── 第 1 组：连接
+        item {
+            GroupLabel("连接")
+            SurfaceCard {
+                RootRow(
+                    title = "API Key",
+                    summary = when {
+                        settings.apiKey.isBlank() -> "未填写"
+                        settings.apiKeyVerified -> "已连接"
+                        else -> "已设置，未验证"
+                    },
+                    tone = when {
+                        settings.apiKey.isBlank() -> RowTone.Danger
+                        settings.apiKeyVerified -> RowTone.Success
+                        else -> RowTone.Warning
+                    },
+                    onClick = { onOpen(SettingsPage.ApiKey) },
+                    trailing = {
+                        if (settings.apiKey.isNotBlank() && settings.apiKeyVerified) {
+                            StatusDot(palette.positive)
+                        }
+                    },
                 )
+                RowDivider()
+                RootRow(
+                    title = "音色",
+                    summary = settings.allVoices().firstOrNull { it.id == settings.voiceId }?.label ?: "未选择",
+                    onClick = { onOpen(SettingsPage.Voice) },
+                )
+                RowDivider()
+                RootRow(
+                    title = "通话音频",
+                    summary = if (settings.speakerOn) "外放" else "听筒",
+                    onClick = { onOpen(SettingsPage.Audio) },
+                )
+            }
+        }
+
+        item { GroupGap() }
+
+        // ── 第 2 组：角色
+        item {
+            GroupLabel("角色")
+            SurfaceCard {
+                RootRow(
+                    title = "角色与人设",
+                    summary = settings.personaName,
+                    onClick = { onOpen(SettingsPage.Persona) },
+                )
+                RowDivider()
+                // 记忆共享：内联滑块
+                InlineSwitchRow(
+                    title = "记忆共享",
+                    detail = if (settings.sharedMemory) "所有角色共用一份记忆" else "每个角色各自独立记忆",
+                    checked = settings.sharedMemory,
+                    onToggle = { store.update { s -> s.copy(sharedMemory = it) } },
+                )
+                RowDivider()
+                // 外观：内联三选一
+                InlineThemeRow(
+                    current = theme,
+                    onPick = { store.update { s -> s.copy(themeModeKey = it.storageKey) } },
+                )
+            }
+        }
+
+        item { GroupGap() }
+
+        // ── 第 3 组：数据与关于
+        item {
+            GroupLabel("数据")
+            SurfaceCard {
+                RootRow(
+                    title = "存储与清理",
+                    summary = "缓存与记录",
+                    onClick = { onOpen(SettingsPage.Storage) },
+                )
+                RowDivider()
+                RootRow(
+                    title = "日志",
+                    summary = "协议事件，排查用",
+                    onClick = { onOpen(SettingsPage.Log) },
+                )
+                RowDivider()
+                // 屏幕与应用控制：组内最后一项，内联滑块 + 说明
+                InlineSwitchRow(
+                    title = "屏幕与应用控制",
+                    detail = "开启后能看到当前屏幕、帮你点按和输入。系统设置 → 无障碍 → 已下载的应用 → YIIAI。",
+                    checked = com.yiiai.app.phone.PhoneUse.isReady(),
+                    onToggle = { com.yiiai.app.phone.PhoneUse.openSettings(context) },
+                    showChevron = false,
+                )
+                RowDivider()
+                RootRow(
+                    title = "关于",
+                    summary = "",
+                    onClick = { onOpen(SettingsPage.About) },
+                )
+            }
+        }
+        item { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+private enum class RowTone { Normal, Success, Warning, Danger }
+
+private fun RowTone.color(palette: com.yiiai.app.ui.theme.YiiPalette) = when (this) {
+    RowTone.Normal -> palette.textDim
+    RowTone.Success -> palette.positive
+    RowTone.Warning -> palette.orbAssistant
+    RowTone.Danger -> palette.danger
+}
+
+@Composable
+private fun GroupLabel(text: String) {
+    Text(
+        text,
+        color = LocalYiiPalette.current.textDim,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Medium,
+        modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
+    )
+}
+
+@Composable
+private fun GroupGap() = Spacer(Modifier.height(16.dp))
+
+@Composable
+private fun SurfaceCard(content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(LocalYiiPalette.current.surface),
+        content = content,
+    )
+}
+
+@Composable
+private fun RowDivider() {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp)
+            .height(1.dp)
+            .background(LocalYiiPalette.current.divider.copy(alpha = 0.5f)),
+    )
+}
+
+@Composable
+private fun StatusDot(color: androidx.compose.ui.graphics.Color) {
+    Box(
+        Modifier
+            .padding(start = 6.dp)
+            .size(7.dp)
+            .clip(CircleShape)
+            .background(color),
+    )
+}
+
+@Composable
+private fun RootRow(
+    title: String,
+    summary: String,
+    onClick: () -> Unit,
+    tone: RowTone = RowTone.Normal,
+    trailing: @Composable (() -> Unit)? = null,
+) {
+    val palette = LocalYiiPalette.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, color = palette.text, fontSize = 15.sp)
+        Spacer(Modifier.weight(1f))
+        if (summary.isNotEmpty()) {
+            Text(
+                summary,
+                color = tone.color(palette),
+                fontSize = 13.sp,
+                fontWeight = if (tone == RowTone.Success) FontWeight.Medium else FontWeight.Normal,
+            )
+        }
+        trailing?.invoke()
+        Icon(
+            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = palette.textDim,
+            modifier = Modifier.size(20.dp),
+        )
+    }
+}
+
+/** 内联滑块行：标题 + 说明 + 滑块，不跳子页。 */
+@Composable
+private fun InlineSwitchRow(
+    title: String,
+    detail: String,
+    checked: Boolean,
+    onToggle: (Boolean) -> Unit,
+    showChevron: Boolean = false,
+) {
+    val palette = LocalYiiPalette.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clickable { onToggle(!checked) }
+            .padding(horizontal = 16.dp, vertical = 11.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(title, color = palette.text, fontSize = 15.sp)
+            Spacer(Modifier.weight(1f))
+            CapsuleSwitch(checked = checked)
+        }
+        Text(
+            detail,
+            color = palette.textDim,
+            fontSize = 12.sp,
+            lineHeight = 17.sp,
+            modifier = Modifier.padding(top = 4.dp, end = 8.dp),
+        )
+    }
+}
+
+/** 外观：横排三选一（系统 / 浅色 / 深色）。 */
+@Composable
+private fun InlineThemeRow(
+    current: ThemeMode,
+    onPick: (ThemeMode) -> Unit,
+) {
+    val palette = LocalYiiPalette.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 11.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            listOf(
+                ThemeMode.SYSTEM to "系统",
+                ThemeMode.LIGHT to "浅色",
+                ThemeMode.DARK to "深色",
+            ).forEach { (mode, label) ->
+                val selected = mode == current
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (selected) palette.accent else palette.surfaceRaised)
+                        .clickable { onPick(mode) }
+                        .padding(vertical = 9.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        label,
+                        color = if (selected) {
+                            if (palette.isDark) androidx.compose.ui.graphics.Color(0xFF10140E)
+                            else androidx.compose.ui.graphics.Color.White
+                        } else {
+                            palette.text
+                        },
+                        fontSize = 13.sp,
+                        fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+                    )
+                }
             }
         }
     }
@@ -388,7 +611,7 @@ private fun VoicePage(store: SettingsStore) {
                     .clip(RoundedCornerShape(14.dp))
                     .background(palette.surface)
                     .clickable { store.update { it.copy(voiceId = v.id) } }
-                    .padding(horizontal = 16.dp, vertical = 15.dp),
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(v.label, color = palette.text, fontSize = 15.sp)
@@ -734,7 +957,7 @@ private fun AppearancePage(store: SettingsStore) {
                     .clip(RoundedCornerShape(14.dp))
                     .background(palette.surface)
                     .clickable { store.update { it.copy(themeModeKey = mode.storageKey) } }
-                    .padding(horizontal = 16.dp, vertical = 15.dp),
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(mode.label, color = palette.text, fontSize = 15.sp)
@@ -783,7 +1006,7 @@ private fun AudioPage(store: SettingsStore) {
                     .clip(RoundedCornerShape(14.dp))
                     .background(palette.surface)
                     .clickable { store.update { it.copy(outputSampleRate = rate) } }
-                    .padding(horizontal = 16.dp, vertical = 15.dp),
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(label, color = palette.text, fontSize = 15.sp)
@@ -828,7 +1051,7 @@ private fun InfoRow(label: String, value: String) {
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(palette.surface)
-            .padding(horizontal = 16.dp, vertical = 15.dp),
+            .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
         Text(label, color = palette.text, fontSize = 15.sp)
         Spacer(Modifier.weight(1f))

@@ -50,7 +50,6 @@ fun UpdateSection(modifier: Modifier = Modifier) {
     var progress by remember { mutableStateOf(0f) }
     var downloaded by remember { mutableStateOf<java.io.File?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
-    var showNotes by remember { mutableStateOf(false) }
 
     val release = (state as? Updater.UpdateResult.Available)?.release
 
@@ -66,11 +65,7 @@ fun UpdateSection(modifier: Modifier = Modifier) {
                 )
             }
             when {
-                busy && progress > 0f -> Text(
-                    "下载 ${(progress * 100).toInt()}%",
-                    color = palette.accent,
-                    fontSize = 13.sp,
-                )
+                busy -> Text("处理中…", color = palette.textDim, fontSize = 13.sp)
                 downloaded != null -> Text(
                     "安装",
                     color = palette.accent,
@@ -78,24 +73,17 @@ fun UpdateSection(modifier: Modifier = Modifier) {
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier
                         .clip(RoundedCornerShape(10.dp))
-                        .clickable {
-                            if (!Updater.canInstall(context)) {
-                                message = "需要先允许「安装未知应用」，已为你打开设置"
-                                Updater.openInstallPermission(context)
-                            } else if (!Updater.install(context, downloaded!!)) {
-                                message = "调起安装器失败，可以到文件管理器里手动安装"
-                            }
-                        }
+                        .clickable { install(context, downloaded!!) { message = it } }
                         .padding(horizontal = 10.dp, vertical = 6.dp),
                 )
                 else -> Text(
-                    if (busy) "检查中…" else "检查更新",
-                    color = if (busy) palette.textDim else palette.accent,
+                    "检查更新",
+                    color = palette.accent,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier
                         .clip(RoundedCornerShape(10.dp))
-                        .clickable(enabled = !busy) {
+                        .clickable {
                             scope.launch {
                                 busy = true
                                 message = null
@@ -105,9 +93,9 @@ fun UpdateSection(modifier: Modifier = Modifier) {
                                 state = r
                                 busy = false
                                 when (r) {
-                                    is Updater.UpdateResult.Available -> showNotes = true
                                     is Updater.UpdateResult.UpToDate -> message = "已经是最新版本"
                                     is Updater.UpdateResult.Failed -> message = r.message
+                                    else -> Unit
                                 }
                             }
                         }
@@ -116,7 +104,6 @@ fun UpdateSection(modifier: Modifier = Modifier) {
             }
         }
 
-        // 有新版本：展示版本号 + 更新说明 + 下载按钮
         if (release != null && downloaded == null) {
             Spacer(Modifier.height(10.dp))
             Column(
@@ -134,13 +121,7 @@ fun UpdateSection(modifier: Modifier = Modifier) {
                 )
                 if (release.notes.isNotBlank()) {
                     Spacer(Modifier.height(6.dp))
-                    Text(
-                        release.notes,
-                        color = palette.textDim,
-                        fontSize = 12.sp,
-                        lineHeight = 18.sp,
-                        maxLines = 6,
-                    )
+                    Text(release.notes, color = palette.textDim, fontSize = 12.sp, lineHeight = 18.sp, maxLines = 5)
                 }
                 Spacer(Modifier.height(10.dp))
                 Box(
@@ -152,25 +133,27 @@ fun UpdateSection(modifier: Modifier = Modifier) {
                             scope.launch {
                                 busy = true
                                 progress = 0.001f
-                                val r = Updater.download(context, release) { p -> progress = p }
+                                Updater.download(context, release) { progress = it }
+                                    .onSuccess { downloaded = it; message = "下载完成，点上方「安装」" }
+                                    .onFailure { message = it.message ?: "下载失败"; progress = 0f }
                                 busy = false
-                                r.onSuccess { file ->
-                                    downloaded = file
-                                    message = "下载完成，点「安装」继续"
-                                }.onFailure { e ->
-                                    message = e.message ?: "下载失败"
-                                    progress = 0f
-                                }
                             }
                         }
                         .padding(vertical = 10.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        if (busy) "下载中 ${(progress * 100).toInt()}%" else "下载更新（${release.apkSize / 1024 / 1024} MB）",
+                        if (busy) "下载中 ${(progress * 100).toInt()}%" else "下载（${release.apkSize / 1024 / 1024} MB）",
                         color = if (palette.isDark) androidx.compose.ui.graphics.Color(0xFF10140E) else androidx.compose.ui.graphics.Color.White,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                if (busy && progress > 0f) {
+                    Spacer(Modifier.height(8.dp))
+                    androidx.compose.material3.LinearProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
             }
@@ -181,34 +164,13 @@ fun UpdateSection(modifier: Modifier = Modifier) {
             Text(it, color = palette.textDim, fontSize = 12.sp)
         }
     }
+}
 
-    if (showNotes && release != null) {
-        AlertDialog(
-            onDismissRequest = { showNotes = false },
-            title = { Text("更新到 ${release.version}") },
-            text = {
-                Text(
-                    release.notes.ifBlank { "这个版本没有写更新说明。" },
-                    fontSize = 13.sp,
-                    lineHeight = 19.sp,
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { showNotes = false }) { Text("稍后") }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    showNotes = false
-                    scope.launch {
-                        busy = true
-                        progress = 0.001f
-                        Updater.download(context, release) { p -> progress = p }
-                            .onSuccess { downloaded = it; message = "下载完成，点「安装」继续" }
-                            .onFailure { message = it.message ?: "下载失败"; progress = 0f }
-                        busy = false
-                    }
-                }) { Text("下载") }
-            },
-        )
+/** 交给系统安装器；失败兜底到浏览器。 */
+private fun install(context: android.content.Context, apk: java.io.File, onMessage: (String) -> Unit) {
+    val id = Updater.requestInstall(context, apk) { msg -> onMessage(msg) }
+    if (id < 0) {
+        onMessage("应用内安装没成功，已改为在浏览器打开下载页，请手动下载安装。")
+        Updater.openInBrowser(context, Updater.Release("", "", "", 0, "https://github.com/lhc1119692022/YIIAI/releases/latest"))
     }
 }

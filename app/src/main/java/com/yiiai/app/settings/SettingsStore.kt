@@ -129,6 +129,8 @@ data class AppSettings(
     val customVoices: List<VoiceOption> = emptyList(),
     /** 首次启动的权限引导是否已经走完。 */
     val onboardingDone: Boolean = false,
+    /** API Key 是否通过过连接验证（只在本机记录，换 Key 会重置）。 */
+    val apiKeyVerified: Boolean = false,
     /** 无障碍服务是否曾经成功连上过。用于「被系统关掉」的提醒。 */
     val phoneUseEverReady: Boolean = false,
 ) {
@@ -237,6 +239,7 @@ class SettingsStore(context: Context) {
             userId = userId,
             customVoices = custom,
             onboardingDone = prefs.getBoolean(K_ONBOARDING, false),
+            apiKeyVerified = prefs.getBoolean(K_API_KEY_OK, false),
             phoneUseEverReady = prefs.getBoolean(K_PHONE_READY, false),
         )
     }
@@ -298,6 +301,7 @@ class SettingsStore(context: Context) {
             putInt(K_RATE, s.outputSampleRate)
             putBoolean(K_SPEAKER, s.speakerOn)
             putBoolean(K_ONBOARDING, s.onboardingDone)
+            putBoolean(K_API_KEY_OK, s.apiKeyVerified)
             putBoolean(K_PHONE_READY, s.phoneUseEverReady)
             putString(
                 K_CUSTOM_VOICES,
@@ -328,6 +332,7 @@ class SettingsStore(context: Context) {
         const val K_USER_ID = "user_id"
         const val K_CUSTOM_VOICES = "custom_voices"
         const val K_ONBOARDING = "onboarding_done"
+        const val K_API_KEY_OK = "api_key_verified"
         const val K_PHONE_READY = "phone_use_ever_ready"
     }
 }

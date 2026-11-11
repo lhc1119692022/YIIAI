@@ -97,6 +97,11 @@
                 android:resource="@xml/updates_paths" />
         </provider>
 
+        <!-- 应用内更新：PackageInstaller 的安装结果回调 -->
+        <receiver
+            android:name=".update.InstallResultReceiver"
+            android:exported="false" />
+
     </application>
 
 </manifest>

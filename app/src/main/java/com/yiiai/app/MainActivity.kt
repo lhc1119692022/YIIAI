@@ -278,9 +278,16 @@ class MainActivity : ComponentActivity() {
         if (intent.hasExtra("design_lab")) {
             designLabOverride.value = intent.getBooleanExtra("design_lab", false)
         }
-        // 已在运行时也要能深链到设置页（截图验收用）。
+        // 已在运行时也要能深链到设置页：清空任务栈重建，最可靠。
         if (intent.getBooleanExtra("open_settings", false)) {
-            settingsDeepLink.value = intent.getStringExtra("settings_page") ?: "Root"
+            val page = intent.getStringExtra("settings_page") ?: "Root"
+            startActivity(
+                android.content.Intent(this, MainActivity::class.java)
+                    .putExtra("open_settings", true)
+                    .putExtra("settings_page", page)
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK or android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+            finish()
         }
         if (intent.getBooleanExtra("auto_start", false)) startCall()
         intent.getStringExtra("probe_watch")?.let { seconds ->

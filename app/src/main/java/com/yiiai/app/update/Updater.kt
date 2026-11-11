@@ -5,7 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
-import androidx.core.content.FileProvider
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -31,6 +31,8 @@ object Updater {
     private const val API_LATEST = "https://api.github.com/repos/$OWNER/$REPO/releases/latest"
 
     const val APK_MIME = "application/vnd.android.package-archive"
+
+    private const val TAG = "YIIAI.Updater"
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -198,16 +200,50 @@ object Updater {
     }
 
     /**
-     * 调起系统安装器。
-     * 必须先有「安装未知来源」权限，否则系统会直接拒绝且没有明显提示。
+     * 申请安装：用 PackageInstaller 会话，把下载好的 APK 交给系统安装器。
+     *
+     * 之前用 FileProvider + ACTION_VIEW 在部分 ROM 上会让 App 被顶掉却不安装；
+     * PackageInstaller 是官方推荐路径，安装界面由系统接管，App 可以留在后台。
+     * 返回 sessionId，或 -1 表示失败。
      */
-    fun install(context: Context, apk: File): Boolean = runCatching {
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.updates", apk)
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, APK_MIME)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    fun requestInstall(context: Context, apk: File, onStatus: (String) -> Unit = {}): Int = runCatching {
+        val manager = context.packageManager
+        val params = android.content.pm.PackageInstaller.SessionParams(
+            android.content.pm.PackageInstaller.SessionParams.MODE_FULL_INSTALL,
+        ).apply {
+            setAppPackageName(context.packageName)
         }
-        context.startActivity(intent)
+        val sessionId = manager.packageInstaller.createSession(params)
+        val session = manager.packageInstaller.openSession(sessionId)
+        session.use { s ->
+            s.openWrite("base.apk", 0, apk.length()).use { out ->
+                apk.inputStream().use { input -> input.copyTo(out) }
+            }
+            val intent = android.content.Intent(context, InstallResultReceiver::class.java).apply {
+                setPackage(context.packageName)
+            }
+            val pending = android.app.PendingIntent.getBroadcast(
+                context,
+                sessionId,
+                intent,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_MUTABLE,
+            )
+            s.commit(pending.intentSender)
+        }
+        onStatus("已交给系统安装器")
+        sessionId
+    }.getOrElse {
+        Log.w(TAG, "requestInstall failed", it)
+        onStatus("安装请求失败：${it.message}")
+        -1
+    }
+
+    /**
+     * 交给系统浏览器 / 下载器去下载安装包（兜底路径）。
+     */
+    fun openInBrowser(context: Context, release: Release): Boolean = runCatching {
+        val url = release.pageUrl.ifBlank { release.apkUrl }
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }.isSuccess
+
 }

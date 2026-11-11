@@ -207,22 +207,37 @@ object AppCatalog {
         if (awaitForeground(context, entry.packageName, 1800)) return "已打开 ${entry.label}"
 
         // 第三轮：让无障碍服务按名字点桌面图标（绕过后台启动限制）
-        val clicked = PhoneUseService.instance?.let { svc ->
+        val svc = PhoneUseService.instance
+        if (svc != null) {
             svc.pressHome()
-            kotlinx.coroutines.delay(700)
-            svc.tapNodeText(entry.label)
-        } ?: false
-        if (clicked && awaitForeground(context, entry.packageName, 2500)) {
-            return "已打开 ${entry.label}"
+            kotlinx.coroutines.delay(900)
+            // 桌面可能需要翻页或搜索：先尝试直接点名字，再尝试在抽屉里找。
+            var clicked = svc.tapNodeText(entry.label)
+            if (!clicked) {
+                // 很多桌面把所有应用放在上滑抽屉里，先上滑再找。
+                svc.swipe(720f, 2200f, 720f, 700f, 320)
+                kotlinx.coroutines.delay(700)
+                clicked = svc.tapNodeText(entry.label)
+            }
+            if (clicked && awaitForeground(context, entry.packageName, 2500)) {
+                return "已打开 ${entry.label}"
+            }
         }
 
         // 仍然没到前台：如实报告，别再说「已打开」。
         val blocked = !hasOverlayPermission(context)
         return buildString {
             append("没能打开「${entry.label}」（包名 ${entry.packageName}）。")
-            if (blocked) {
+            if (isStartConfirmShowing(context)) {
+                append("系统弹出了「是否允许 YIIAI 启动应用」的确认框，需要用户点『允许』。")
+                append("请让用户看一眼屏幕并点允许，然后再试一次。")
+            } else if (blocked) {
                 append("YIIAI 没有「显示在其他应用上层」权限，Android 会拦截后台启动应用。")
                 append("请告诉用户：到系统设置给 YIIAI 开启悬浮窗权限后重试；")
+            } else if (isStopped(context, entry.packageName)) {
+                append("这个应用当前处于「强制停止」状态（系统里 stopped=true），")
+                append("Android 不允许其他应用把它拉起来。请让用户自己在桌面点一次打开它，")
+                append("之后 YIIAI 就能正常打开了。")
             } else {
                 append("启动被系统拦下了，可能是应用需要登录、正在更新，或被系统冻结。")
             }
@@ -230,21 +245,53 @@ object AppCatalog {
         }
     }
 
+    /** 应用是否处于「强制停止」状态：这种状态下第三方无法启动它。 */
+    private fun isStopped(context: Context, pkg: String): Boolean = runCatching {
+        val info = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.getPackageInfo(pkg, android.content.pm.PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(pkg, 0)
+        }
+        (info.applicationInfo?.flags ?: 0) and android.content.pm.ApplicationInfo.FLAG_STOPPED != 0
+    }.getOrDefault(false)
+
     private fun hasOverlayPermission(context: Context): Boolean =
         android.provider.Settings.canDrawOverlays(context)
 
-    private suspend fun awaitForeground(context: Context, pkg: String, timeoutMs: Long): Boolean {
+    /**
+     * 等目标应用真正到前台。
+     *
+     * HyperOS 在 App 拉起别的应用时会弹 `ConfirmStartActivity`（"是否允许 YIIAI 启动…"），
+     * 这时前台是 com.miui.securitycenter。以前把它当失败直接返回，用户还没看清弹窗
+     * 就被告知"没打开"；现在会一直等到用户点完确认（最多 [confirmTimeoutMs]）。
+     */
+    private suspend fun awaitForeground(
+        context: Context,
+        pkg: String,
+        timeoutMs: Long,
+        confirmTimeoutMs: Long = 15_000L,
+    ): Boolean {
         val step = 150L
         var waited = 0L
-        while (waited < timeoutMs) {
-            // 绕过 ForegroundApp 的 900ms 缓存，启动后要看到即时结果。
+        var confirming = false
+        while (waited < (if (confirming) confirmTimeoutMs else timeoutMs)) {
             ForegroundApp.invalidate()
-            if (ForegroundApp.current(context) == pkg) return true
+            val top = ForegroundApp.current(context)
+            if (top == pkg) return true
+            // HyperOS / MIUI 的启动确认弹窗
+            if (top == "com.miui.securitycenter" || top == "com.miui.packageinstaller") {
+                confirming = true
+            }
             kotlinx.coroutines.delay(step)
             waited += step
         }
         return false
     }
+
+    /** 当前是不是停在系统的「允许启动」确认框上。 */
+    private fun isStartConfirmShowing(context: Context): Boolean =
+        ForegroundApp.current(context) in setOf("com.miui.securitycenter", "com.miui.packageinstaller")
 
     private fun notFoundMessage(context: Context, key: String): String {
         val similar = search(context, key, 5).map { it.label }
