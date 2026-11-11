@@ -60,8 +60,9 @@ object PhoneUse {
     fun launchableApps(context: Context): List<Pair<String, String>> =
         AppCatalog.all(context).map { it.label to it.packageName }
 
-    fun launchApp(context: Context, nameOrPackage: String): String =
-        AppCatalog.launch(context, nameOrPackage)
+    /** 打开应用并确认真的到了前台。 */
+    suspend fun launchApp(context: Context, nameOrPackage: String): String =
+        AppCatalog.launchVerified(context, nameOrPackage)
 
     /** 按关键词找应用，给模型「查一下装没装」用。 */
     fun searchApps(context: Context, query: String, limit: Int = 12): List<Pair<String, String>> =

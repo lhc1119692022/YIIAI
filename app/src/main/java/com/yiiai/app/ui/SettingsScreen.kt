@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -47,6 +48,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -248,31 +250,120 @@ private fun ApiKeyPage(store: SettingsStore) {
     val palette = LocalYiiPalette.current
     var key by rememberSaveable { mutableStateOf(store.current.apiKey) }
     var visible by rememberSaveable { mutableStateOf(false) }
+    var checking by remember { mutableStateOf(false) }
+    // null = 还没验证过；true/false = 上次验证结果
+    var status by remember { mutableStateOf<Boolean?>(null) }
+    var message by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val saved = store.current.apiKey
+    val configured = saved.isNotBlank()
+    val dirty = key.trim() != saved
+
     FieldPage {
+        // 顶部状态：一颗彩色圆点 + 文字，比一行灰字清楚。
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(9.dp)
+                    .clip(CircleShape)
+                    .background(
+                        when {
+                            checking -> palette.textDim
+                            status == true -> palette.positive
+                            status == false -> palette.danger
+                            configured -> palette.positive
+                            else -> palette.danger
+                        },
+                    ),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                when {
+                    checking -> "正在验证连接…"
+                    status == true -> "已连接"
+                    status == false -> "连接失败"
+                    configured -> "已设置（未验证）"
+                    else -> "未连接"
+                },
+                color = when {
+                    checking -> palette.textDim
+                    status == true || (status == null && configured) -> palette.positive
+                    status == false -> palette.danger
+                    else -> palette.danger
+                },
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+
         OutlinedTextField(
             value = key,
-            onValueChange = { key = it },
+            onValueChange = {
+                key = it
+                status = null
+                message = null
+            },
             label = { Text("API Key") },
             singleLine = true,
             visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
             trailingIcon = { TextButton(onClick = { visible = !visible }) { Text(if (visible) "隐藏" else "显示") } },
             modifier = Modifier.fillMaxWidth(),
         )
-        PrimaryAction("保存") { store.update { it.copy(apiKey = key.trim()) } }
+
+        // 「连接」：验证通过才写入设置，失败不保存。
+        PrimaryAction(
+            when {
+                checking -> "正在连接…"
+                status == true && !dirty -> "已连接"
+                else -> "连接"
+            },
+        ) {
+            if (checking) return@PrimaryAction
+            scope.launch {
+                checking = true
+                message = null
+                when (val r = com.yiiai.app.settings.ApiKeyCheck.verify(key)) {
+                    is com.yiiai.app.settings.ApiKeyCheck.Result.Ok -> {
+                        store.update { it.copy(apiKey = key.trim()) }
+                        status = true
+                        message = "连接成功，已自动保存"
+                    }
+                    is com.yiiai.app.settings.ApiKeyCheck.Result.Invalid -> {
+                        status = false
+                        message = r.message
+                    }
+                    is com.yiiai.app.settings.ApiKeyCheck.Result.Network -> {
+                        status = null
+                        message = "连不上服务器：${r.message}。可以检查网络后重试。"
+                    }
+                }
+                checking = false
+            }
+        }
+
+        message?.let {
+            Text(
+                it,
+                color = if (status == false) palette.danger else palette.textDim,
+                fontSize = 12.sp,
+                lineHeight = 18.sp,
+            )
+        }
+
         LinkAction("去 platform.moss.cn 创建") {
             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://platform.moss.cn")))
         }
         Spacer(Modifier.height(4.dp))
         Text(
-            "Key 只保存在本机，用 Android Keystore 加密。",
+            "Key 只保存在本机，用 Android Keystore 加密；只有连接成功才会保存。",
             color = palette.textDim,
             fontSize = 12.sp,
+            lineHeight = 18.sp,
         )
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun VoicePage(store: SettingsStore) {
     val palette = LocalYiiPalette.current
@@ -712,7 +803,7 @@ private fun AboutPage(store: SettingsStore) {
     val context = LocalContext.current
     val settings by store.state.collectAsStateWithLifecycleCompat()
     FieldPage {
-        InfoRow("版本", com.yiiai.app.BuildConfig.VERSION_NAME)
+        UpdateSection(Modifier.padding(vertical = 6.dp))
         InfoRow("模型", "MOSS-Live 1.0（moss-live-1.0）")
         InfoRow("设备 ID", settings.memoryUser().takeLast(12))
         Row(

@@ -19,6 +19,8 @@ fun YiiRoot(
     initialSettingsPage: String? = null,
     designLab: Boolean = false,
     designLabPage: Int = 0,
+    deepLinkPage: String? = null,
+    onDeepLinkConsumed: () -> Unit = {},
 ) {
     if (designLab) {
         DesignLabScreen(initialPage = designLabPage)
@@ -26,7 +28,21 @@ fun YiiRoot(
     }
     // null = 首页；否则为设置页要打开的子页面名（"Root" 为设置首页）。
     var settingsPage by rememberSaveable {
-        mutableStateOf(if (startInSettings) initialSettingsPage ?: "Root" else null)
+        mutableStateOf(
+            when {
+                startInSettings -> initialSettingsPage ?: "Root"
+                // debug 直达：--es settings_page 单独给也能打开（截图验收用）
+                initialSettingsPage != null -> initialSettingsPage
+                else -> null
+            },
+        )
+    }
+    // 运行时深链：改完立即消费掉，避免返回后又被拽回设置页。
+    androidx.compose.runtime.LaunchedEffect(deepLinkPage) {
+        if (deepLinkPage != null) {
+            settingsPage = deepLinkPage
+            onDeepLinkConsumed()
+        }
     }
     val page = settingsPage
     if (page != null) {

@@ -10,6 +10,12 @@ object ForegroundApp {
     private var cachedAt = 0L
     private var cached: String? = null
 
+    /** 启动应用后强制重新查，别用缓存。 */
+    fun invalidate() {
+        cachedAt = 0L
+        cached = null
+    }
+
     fun current(context: Context): String? {
         val now = System.currentTimeMillis()
         // 一秒内复用，避免每帧都查系统。

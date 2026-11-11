@@ -64,6 +64,9 @@ class MainActivity : ComponentActivity() {
     /** 设计实验室开关：onNewIntent 可以覆盖，不用重启 App 就能进出。 */
     private val designLabOverride = androidx.compose.runtime.mutableStateOf<Boolean?>(null)
 
+    /** 运行时深链到设置子页；清空后回到首页。 */
+    private val settingsDeepLink = androidx.compose.runtime.mutableStateOf<String?>(null)
+
     private val debugDesignLab: Boolean
         get() = designLabOverride.value
             ?: (debugExtras?.getBooleanExtra("design_lab", false) == true)
@@ -172,9 +175,11 @@ class MainActivity : ComponentActivity() {
                         onStartCall = ::startCall,
                         onToggleOverlay = ::toggleOverlay,
                         startInSettings = startInSettings,
-                        initialSettingsPage = initialSettingsPage,
+                        initialSettingsPage = initialSettingsPage ?: settingsDeepLink.value,
                         designLab = designLabOverride.value ?: debugDesignLab,
                         designLabPage = debugDesignPage,
+                        deepLinkPage = settingsDeepLink.value,
+                        onDeepLinkConsumed = { settingsDeepLink.value = null },
                     )
                 }
             }
@@ -228,6 +233,12 @@ class MainActivity : ComponentActivity() {
                 }
                 return@launch
             }
+            if (what.startsWith("click:")) {
+                val label = what.removePrefix("click:")
+                val ok = svc?.tapNodeText(label) ?: false
+                android.util.Log.i("YIIAI.PhoneUse", "click[$label]=$ok")
+                return@launch
+            }
             if (what.startsWith("open:")) {
                 val target = what.removePrefix("open:")
                 val r = com.yiiai.app.phone.PhoneUse.launchApp(this@MainActivity, target)
@@ -266,6 +277,10 @@ class MainActivity : ComponentActivity() {
         // 已在运行时的重新启动也要能触发自动通话，方便验证。
         if (intent.hasExtra("design_lab")) {
             designLabOverride.value = intent.getBooleanExtra("design_lab", false)
+        }
+        // 已在运行时也要能深链到设置页（截图验收用）。
+        if (intent.getBooleanExtra("open_settings", false)) {
+            settingsDeepLink.value = intent.getStringExtra("settings_page") ?: "Root"
         }
         if (intent.getBooleanExtra("auto_start", false)) startCall()
         intent.getStringExtra("probe_watch")?.let { seconds ->

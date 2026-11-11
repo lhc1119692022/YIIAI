@@ -175,6 +175,87 @@ object AppCatalog {
         }
     }
 
+    /**
+     * 启动并**确认真的到了前台**。
+     *
+     * 之前只判断 `startActivity` 没抛异常就回「已打开」，但 Android 10+ 的后台启动限制
+     * 会让启动被系统静默拦截——不抛异常、也没打开。所以要等一下再看前台包名。
+     */
+    suspend fun launchVerified(context: Context, nameOrPackage: String): String {
+        val entry = find(context, nameOrPackage)
+        if (entry == null) return notFoundMessage(context, nameOrPackage)
+        val manager = context.packageManager
+        val intent = manager.getLaunchIntentForPackage(entry.packageName)
+            ?: entry.activity?.let { cls ->
+                Intent().apply { setClassName(entry.packageName, cls) }
+            }
+            ?: return "「${entry.label}」没有可启动的界面"
+
+        // 第一轮：常规启动 + 等待确认
+        start(context, intent)
+        if (awaitForeground(context, entry.packageName, 1800)) return "已打开 ${entry.label}"
+
+        // 第二轮：补上 RESET_TASK_IF_NEEDED，有些 Launcher 入口需要它才会切到已有任务
+        start(
+            context,
+            Intent(intent).addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP,
+            ),
+        )
+        if (awaitForeground(context, entry.packageName, 1800)) return "已打开 ${entry.label}"
+
+        // 第三轮：让无障碍服务按名字点桌面图标（绕过后台启动限制）
+        val clicked = PhoneUseService.instance?.let { svc ->
+            svc.pressHome()
+            kotlinx.coroutines.delay(700)
+            svc.tapNodeText(entry.label)
+        } ?: false
+        if (clicked && awaitForeground(context, entry.packageName, 2500)) {
+            return "已打开 ${entry.label}"
+        }
+
+        // 仍然没到前台：如实报告，别再说「已打开」。
+        val blocked = !hasOverlayPermission(context)
+        return buildString {
+            append("没能打开「${entry.label}」（包名 ${entry.packageName}）。")
+            if (blocked) {
+                append("YIIAI 没有「显示在其他应用上层」权限，Android 会拦截后台启动应用。")
+                append("请告诉用户：到系统设置给 YIIAI 开启悬浮窗权限后重试；")
+            } else {
+                append("启动被系统拦下了，可能是应用需要登录、正在更新，或被系统冻结。")
+            }
+            append("不要对用户说已打开，如实说明没打开。")
+        }
+    }
+
+    private fun hasOverlayPermission(context: Context): Boolean =
+        android.provider.Settings.canDrawOverlays(context)
+
+    private suspend fun awaitForeground(context: Context, pkg: String, timeoutMs: Long): Boolean {
+        val step = 150L
+        var waited = 0L
+        while (waited < timeoutMs) {
+            // 绕过 ForegroundApp 的 900ms 缓存，启动后要看到即时结果。
+            ForegroundApp.invalidate()
+            if (ForegroundApp.current(context) == pkg) return true
+            kotlinx.coroutines.delay(step)
+            waited += step
+        }
+        return false
+    }
+
+    private fun notFoundMessage(context: Context, key: String): String {
+        val similar = search(context, key, 5).map { it.label }
+        return if (similar.isEmpty()) {
+            "没找到叫「$key」的应用。设备上能启动的应用共 ${all(context).size} 个，例如：" +
+                all(context).take(20).joinToString("、") { it.label }
+        } else {
+            "没找到叫「$key」的应用。相近的有：${similar.joinToString("、")}。"
+        }
+    }
+
     private fun start(context: Context, intent: Intent): Boolean = runCatching {
         context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }.isSuccess

@@ -94,7 +94,7 @@ class PhoneToolRunner(
                     "没找到可以输入的输入框，先点一下输入框再试"
                 }
             }
-            Tools.OPEN_APP -> PhoneUse.launchApp(appContext, args.str("app").orEmpty())
+            Tools.OPEN_APP -> com.yiiai.app.phone.AppCatalog.launchVerified(appContext, args.str("app").orEmpty())
             Tools.LIST_APPS -> {
                 val query = args.str("query").orEmpty()
                 val hits = PhoneUse.searchApps(appContext, query, 20)
