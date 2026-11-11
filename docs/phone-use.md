@@ -2,6 +2,8 @@
 
 YIIAI通过一个**无障碍服务**看到你的屏幕、帮你点击和输入。没有用录屏授权，所以截图时不弹授权框、也没有录屏提示条。
 
+**视觉优先，控件树辅助**：模型主要靠持续的屏幕画面理解你在看什么；控件树只用来精确定位按钮坐标。原因很直接——控件树只有结构和文字，用户看到的图片、视频帧、商品图、弹窗样式它都读不到。
+
 ## 开启方式
 
 系统设置 → 无障碍 → 已下载的应用 → **YIIAI** → 打开。
@@ -16,7 +18,9 @@ App 内的引导：设置 → **屏幕与应用控制**，页面顶部会显示�
 
 | 工具 | 作用 | 只读 |
 | --- | --- | --- |
-| `look_at_screen` | 截一张当前屏幕发给模型（tagged-v1 的 0x02 帧） | 是 |
+| `look_at_screen` | 看一眼并**开启持续画面流**（tagged-v1 的 0x02 帧） | 是 |
+| `watch_screen(seconds)` | 持续观看屏幕 30–600 秒，到点自动停 | 是 |
+| `stop_watching` | 停止观看屏幕 | 是 |
 | `read_screen` | 读取当前界面的文字与可点击元素，带序号和坐标 | 是 |
 | `tap_screen(x,y)` | 按坐标点击 | 否 |
 | `tap_element(index\|text)` | 按序号或文字点击 | 否 |
@@ -28,12 +32,30 @@ App 内的引导：设置 → **屏幕与应用控制**，页面顶部会显示�
 调用流程按协议走：`response.function_call_arguments.done` → 本地执行 → `conversation.item.create`（function_call_output）→ 收到 `conversation.item.created` → `response.create`。
 如果服务端没有回 `item.created`，客户端 1.5 秒后自己发 `response.create`，避免这一轮卡住。
 
+## 屏幕画面流
+
+- 约 **1 秒一帧**，和 `media.configure.video.interval_ms` 一致。
+- 只在**通话中**、且用户停在别的 App 时推流；App 自己在前台时不推，避免把自己的界面发给模型。
+- `look_at_screen` 开启后默认续期 **180 秒**，期间没有新的请求就自动关掉并通知服务端关通道。
+- 连续截图失败（页面禁止截屏）会降频重试，不会刷屏。
+
 ## 截图
 
 - 用 `AccessibilityService.takeScreenshot()`（Android 11+），长边缩到 **1024**、JPEG 质量 **80**。
 - 格式通过 `media.configure.video` 提前声明；默认 profile 只有长边 512 / 质量 0.75，文字会糊。
 - 发帧前先发 `video.state{source:"screen",enabled:true}`。
 - 截图只在内存里转成 JPEG 直接走 WebSocket，**不落盘**。
+
+## 应用列表可见性
+
+Android 11+ 默认看不到别的应用。`AndroidManifest.xml` 里声明了 `<queries>`（MAIN/LAUNCHER），
+没有这段的话 `queryIntentActivities` 只返回自己和系统应用，「打开淘宝」会变成「找不到这个应用」。
+
+## 首次启动
+
+第一次打开 App 会先走一遍权限引导页（[PermissionSetupScreen.kt](<app/src/main/java/com/yiiai/app/ui/PermissionSetupScreen.kt>)）：
+麦克风、通知当场申请；悬浮窗、无障碍说明后带路到系统页面，回到 App 自动刷新状态。
+走完写入 `onboardingDone`，之后不再出现。
 
 ## 已知限制
 

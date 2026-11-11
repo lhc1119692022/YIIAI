@@ -18,6 +18,10 @@ class PhoneToolRunner(
     private val sendScreenFrame: (ByteArray) -> Boolean,
     /** 发送一条客户端事件（用于先打开屏幕画面）。 */
     private val sendEvent: (String) -> Boolean = { false },
+    /** 开启屏幕实时画面流（视频为主体）。 */
+    private val startWatching: (Int) -> Unit = {},
+    /** 当前是否已经在推流。 */
+    private val isWatching: () -> Boolean = { false },
 ) {
     private val appContext = context.applicationContext
 
@@ -28,6 +32,18 @@ class PhoneToolRunner(
         }
         return when (name) {
             Tools.LOOK -> lookAtScreen(svc!!)
+            Tools.WATCH -> {
+                val seconds = args.num("seconds")?.toInt()?.coerceIn(30, 600) ?: 180
+                startWatching(seconds)
+                // 先把当前这一帧补上，模型不用等下一轮刷新。
+                val (bytes, _) = svc!!.screenshot(maxSide = 1024, quality = 80)
+                bytes?.let { sendScreenFrame(it) }
+                "已经开始持续看你的屏幕，接下来大约 ${seconds / 60} 分钟内的画面变化我都能看到。"
+            }
+            Tools.STOP_WATCH -> {
+                sendEvent(com.yiiai.app.live.LiveProtocol.videoState("screen", false))
+                "已经停止看屏幕。"
+            }
             Tools.READ -> svc!!.dumpUi()
             Tools.TAP -> {
                 val x = args.num("x")
@@ -84,6 +100,8 @@ class PhoneToolRunner(
     }
 
     private suspend fun lookAtScreen(svc: PhoneUseService): String {
+        // 视频为主：开启持续画面流，之后用户屏幕的变化会持续送过来。
+        startWatching(180)
         // 协议要求先声明要发屏幕帧，否则服务端可能忽略这条 0x02。
         sendEvent(com.yiiai.app.live.LiveProtocol.videoState("screen", true))
         kotlinx.coroutines.delay(120)
@@ -91,7 +109,8 @@ class PhoneToolRunner(
         if (bytes == null) return reason
         val ok = sendScreenFrame(bytes)
         return if (ok) {
-            "已经把当前屏幕截图发给你了（${bytes.size / 1024}KB），现在可以看到画面。"
+            "已经把当前屏幕发给你了（${bytes.size / 1024}KB）。之后你的屏幕会持续更新，" +
+                "用户换页面、滚动、点开别的东西，你都能接着看到。"
         } else {
             "截图成功但没能发出去，连接可能断了。"
         }

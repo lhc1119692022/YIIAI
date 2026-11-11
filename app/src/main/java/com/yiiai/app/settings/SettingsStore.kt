@@ -127,6 +127,8 @@ data class AppSettings(
     val userId: String = "",
     /** 用户通过音色 ID 自行添加的音色。 */
     val customVoices: List<VoiceOption> = emptyList(),
+    /** 首次启动的权限引导是否已经走完。 */
+    val onboardingDone: Boolean = false,
 ) {
     val activePersona: Persona
         get() = personas.firstOrNull { it.id == activePersonaId } ?: personas.firstOrNull() ?: Persona.DEFAULT
@@ -232,6 +234,7 @@ class SettingsStore(context: Context) {
             speakerOn = prefs.getBoolean(K_SPEAKER, d.speakerOn),
             userId = userId,
             customVoices = custom,
+            onboardingDone = prefs.getBoolean(K_ONBOARDING, false),
         )
     }
 
@@ -291,6 +294,7 @@ class SettingsStore(context: Context) {
             putString(K_THEME, s.themeModeKey)
             putInt(K_RATE, s.outputSampleRate)
             putBoolean(K_SPEAKER, s.speakerOn)
+            putBoolean(K_ONBOARDING, s.onboardingDone)
             putString(
                 K_CUSTOM_VOICES,
                 s.customVoices.joinToString("\u001F") { "${it.id}\u001E${it.label}" },
@@ -319,5 +323,6 @@ class SettingsStore(context: Context) {
         const val K_SPEAKER = "speaker_on"
         const val K_USER_ID = "user_id"
         const val K_CUSTOM_VOICES = "custom_voices"
+        const val K_ONBOARDING = "onboarding_done"
     }
 }

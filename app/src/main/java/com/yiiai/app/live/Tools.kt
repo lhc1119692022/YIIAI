@@ -17,6 +17,8 @@ import kotlinx.serialization.json.putJsonObject
 object Tools {
 
     const val LOOK = "look_at_screen"
+    const val WATCH = "watch_screen"
+    const val STOP_WATCH = "stop_watching"
     const val READ = "read_screen"
     const val TAP = "tap_screen"
     const val TAP_ELEMENT = "tap_element"
@@ -26,21 +28,24 @@ object Tools {
     const val OPEN_APP = "open_app"
 
     /** 需要无障碍服务（眼睛和手）的工具。 */
-    val phoneTools = setOf(LOOK, READ, TAP, TAP_ELEMENT, SWIPE, KEY, TYPE, OPEN_APP)
+    val phoneTools = setOf(LOOK, WATCH, STOP_WATCH, READ, TAP, TAP_ELEMENT, SWIPE, KEY, TYPE, OPEN_APP)
 
     val all: JsonArray = buildJsonArray {
         add(
             tool(
                 name = LOOK,
-                description = "看一眼用户此刻的屏幕：截一张图发给模型。用户问「这个怎么样」「你看这个」，" +
-                    "或需要看清界面内容时调用。",
+                description = "看一眼用户此刻的屏幕，并开始持续接收画面：用户换页面、滚动、点开别的东西，" +
+                    "你都会接着看到。用户问「这个怎么样」「你看这个」、或需要讨论屏幕上任何东西时调用。" +
+                    "首选这个工具；read_screen 只在需要精确找按钮坐标时作为辅助。",
                 readOnly = true,
             ),
         )
         add(
             tool(
                 name = READ,
-                description = "读取当前界面的文字和可点击元素（带序号和坐标），比截图省时间，适合找按钮、确认在哪个页面。",
+                description = "辅助工具：读取当前界面的控件树（文字、序号、坐标）。" +
+                    "它只反映结构，看不到图片、视频画面和弹窗样式，所以只在需要精确点击某个按钮时用；" +
+                    "理解用户在看什么请用 look_at_screen。",
                 readOnly = true,
             ),
         )

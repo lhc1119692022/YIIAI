@@ -84,7 +84,29 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
             val ws = liveSocket
             if (ws == null) false else ws.send(json)
         },
+        startWatching = { seconds -> watchScreen(seconds) },
+        isWatching = { screenStreamer.running },
     )
+
+    /**
+     * 屏幕实时画面。模型主要靠它「看见」用户在做什么，控件树只用来精确点击。
+     * 由工具 look_at_screen / watch_screen 开启，闲置一段时间自动关闭。
+     */
+    internal val screenStreamer = com.yiiai.app.phone.ScreenStreamer(
+        context = appContext,
+        sendEvent = { json -> liveSocket?.send(json) ?: false },
+        sendFrame = { bytes ->
+            val frame = ByteArray(bytes.size + 1)
+            frame[0] = LiveProtocol.TAG_SCREEN
+            System.arraycopy(bytes, 0, frame, 1, bytes.size)
+            liveSocket?.send(frame.toByteString()) ?: false
+        },
+        onLog = { log(it) },
+    )
+
+    /** 屏幕画面闲置多久后自动关掉。 */
+    private var watchUntil = 0L
+    private var watchTimer: kotlinx.coroutines.Job? = null
 
     /** 已执行过的 call_id，避免重复调用同一工具。只留最近一批，长通话也不会一直涨。 */
     private val handledCalls = LinkedHashSet<String>()
@@ -158,6 +180,13 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
     fun clearLog() {
         _log.value = emptyList()
     }
+
+    /** 界面用：手动开关屏幕画面。 */
+    fun setWatching(on: Boolean) {
+        if (on) watchScreen(300) else stopWatching()
+    }
+
+    val isWatching: Boolean get() = screenStreamer.running
 
     fun dismissError() { _state.update { it.copy(error = null, phase = if (it.phase == CallPhase.Failed) CallPhase.Idle else it.phase) } }
 
@@ -469,6 +498,32 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
         }
     }
 
+    /**
+     * 开启/续期屏幕画面。[seconds] 秒内没有新的请求就自动关闭，避免一直推流。
+     */
+    internal fun watchScreen(seconds: Int = 120) {
+        if (step != SetupStep.Done) return
+        watchUntil = System.currentTimeMillis() + seconds * 1000L
+        if (!screenStreamer.running) {
+            screenStreamer.start(scope)
+        }
+        watchTimer?.cancel()
+        watchTimer = scope.launch {
+            while (System.currentTimeMillis() < watchUntil) {
+                kotlinx.coroutines.delay(1000)
+            }
+            if (screenStreamer.running) {
+                screenStreamer.stop("屏幕画面临时关闭（${seconds} 秒没有新的请求）")
+            }
+        }
+    }
+
+    internal fun stopWatching() {
+        watchTimer?.cancel()
+        watchTimer = null
+        screenStreamer.stop()
+    }
+
     // ---------------------------------------------------------------- 音频
 
     /** 麦克风线程调用。 */
@@ -631,6 +686,7 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
 
     /** 只释放本次连接的资源，保留会话 ID、字幕与音频路由。 */
     private fun releaseConnection() {
+        stopWatching()
         generation++
         liveSocket = null
         mic?.stop()
@@ -658,6 +714,7 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
     }
 
     private fun teardown() {
+        stopWatching()
         generation++
         liveSocket = null
         mic?.stop()

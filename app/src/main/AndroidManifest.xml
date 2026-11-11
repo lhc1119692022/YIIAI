@@ -19,6 +19,18 @@
     <!-- 屏幕共享（旧方案，现改用无障碍截图，权限保留备用） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
+    <!--
+        Android 11+ 默认看不到其他应用。没有下面这段可见性声明，
+        queryIntentActivities 只会返回自己和系统应用，
+        「打开淘宝」就会变成「找不到这个应用」。
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <application
         android:name=".YiiApp"
         android:allowBackup="false"

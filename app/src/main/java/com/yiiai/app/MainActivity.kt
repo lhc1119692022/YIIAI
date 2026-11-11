@@ -12,6 +12,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
@@ -20,6 +21,7 @@ import com.yiiai.app.call.LiveCallService
 import com.yiiai.app.overlay.OverlayService
 import com.yiiai.app.settings.SettingsStore
 import com.yiiai.app.live.isActive
+import com.yiiai.app.ui.PermissionSetupScreen
 import com.yiiai.app.ui.YiiRoot
 import com.yiiai.app.ui.settingsPageFromKey
 import com.yiiai.app.ui.theme.ThemeMode
@@ -162,16 +164,33 @@ class MainActivity : ComponentActivity() {
                         OverlayService.show(this@MainActivity)
                     }
                 }
-                YiiRoot(
-                    live = app.live,
-                    settingsStore = app.settings,
-                    onStartCall = ::startCall,
-                    onToggleOverlay = ::toggleOverlay,
-                    startInSettings = startInSettings,
-                    initialSettingsPage = initialSettingsPage,
-                    designLab = debugDesignLab,
-                    designLabPage = debugDesignPage,
-                )
+                // 首次启动：先走一遍权限引导，走完才进主界面。
+                var showSetup by androidx.compose.runtime.saveable.rememberSaveable {
+                    androidx.compose.runtime.mutableStateOf(
+                        !app.settings.current.onboardingDone && !startInSettings && !debugDesignLab,
+                    )
+                }
+                if (showSetup) {
+                    PermissionSetupScreen(
+                        onMicRequest = { micPermission.launch(Manifest.permission.RECORD_AUDIO) },
+                        onNotificationRequest = { requestNotificationPermissionIfNeeded() },
+                        onDone = {
+                            app.settings.update { it.copy(onboardingDone = true) }
+                            showSetup = false
+                        },
+                    )
+                } else {
+                    YiiRoot(
+                        live = app.live,
+                        settingsStore = app.settings,
+                        onStartCall = ::startCall,
+                        onToggleOverlay = ::toggleOverlay,
+                        startInSettings = startInSettings,
+                        initialSettingsPage = initialSettingsPage,
+                        designLab = debugDesignLab,
+                        designLabPage = debugDesignPage,
+                    )
+                }
             }
         }
     }
