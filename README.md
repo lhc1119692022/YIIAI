@@ -4,7 +4,7 @@
 
 - 协议笔记：[docs/moss-live-protocol.md](docs/moss-live-protocol.md)
 - 屏幕读取与应用控制：[docs/phone-use.md](docs/phone-use.md)
-- 视觉语言（YIIAI）：[docs/design-language.md](docs/design-language.md)
+- 视觉语言：[docs/design-language.md](docs/design-language.md)
 - 路线图与进度：[docs/roadmap.md](docs/roadmap.md)
 
 ## 构建
