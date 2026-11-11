@@ -228,6 +228,17 @@ class MainActivity : ComponentActivity() {
                 }
                 return@launch
             }
+            if (what.startsWith("open:")) {
+                val target = what.removePrefix("open:")
+                val r = com.yiiai.app.phone.PhoneUse.launchApp(this@MainActivity, target)
+                android.util.Log.i("YIIAI.PhoneUse", "open[$target] -> $r")
+                kotlinx.coroutines.delay(2000)
+                android.util.Log.i(
+                    "YIIAI.PhoneUse",
+                    "foreground=" + com.yiiai.app.phone.ForegroundApp.current(this@MainActivity),
+                )
+                return@launch
+            }
             if (what == "apps") {
                 val apps = com.yiiai.app.phone.PhoneUse.launchableApps(this@MainActivity)
                 android.util.Log.i("YIIAI.PhoneUse", "apps=${apps.size} :: " + apps.take(12).joinToString { it.first })

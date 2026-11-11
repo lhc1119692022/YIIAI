@@ -31,6 +31,13 @@
         </intent>
     </queries>
 
+    <!--
+        Android 11+ 的应用可见性总开关。
+        没有它，getInstalledPackages / queryIntentActivities 只能拿到一小部分应用，
+        用户把某个 App 藏起来或冻结后，「打开某某」就会失败。
+    -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
     <application
         android:name=".YiiApp"
         android:allowBackup="false"

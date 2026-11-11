@@ -56,39 +56,17 @@ object PhoneUse {
         else -> "未开启"
     }
 
-    /** 已安装的可启动应用，用于「打开某个 App」。 */
-    fun launchableApps(context: Context): List<Pair<String, String>> {
-        val manager = context.packageManager
-        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        return manager.queryIntentActivities(intent, 0)
-            .mapNotNull { info ->
-                val label = info.loadLabel(manager)?.toString()?.trim().orEmpty()
-                val pkg = info.activityInfo?.packageName ?: return@mapNotNull null
-                if (label.isEmpty() || pkg == context.packageName) null else label to pkg
-            }
-            .distinctBy { it.second }
-            .sortedBy { it.first }
-    }
+    /** 已安装的可启动应用（全量，含被隐藏/冻结的）。 */
+    fun launchableApps(context: Context): List<Pair<String, String>> =
+        AppCatalog.all(context).map { it.label to it.packageName }
 
-    fun launchApp(context: Context, nameOrPackage: String): String {
-        val manager = context.packageManager
-        val key = nameOrPackage.trim()
-        if (key.isEmpty()) return "没有给出应用名"
-        // 先当包名试
-        if (key.contains('.')) {
-            val byPackage = manager.getLaunchIntentForPackage(key)
-            if (byPackage != null) {
-                runCatching { context.startActivity(byPackage.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-                return "已打开 $key"
-            }
-        }
-        val apps = launchableApps(context)
-        val hit = apps.firstOrNull { it.first == key }
-            ?: apps.firstOrNull { it.first.contains(key, ignoreCase = true) }
-            ?: return "没找到叫「$key」的应用"
-        val intent = manager.getLaunchIntentForPackage(hit.second)
-            ?: return "「${hit.first}」没有可启动的界面"
-        runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-        return "已打开 ${hit.first}"
-    }
+    fun launchApp(context: Context, nameOrPackage: String): String =
+        AppCatalog.launch(context, nameOrPackage)
+
+    /** 按关键词找应用，给模型「查一下装没装」用。 */
+    fun searchApps(context: Context, query: String, limit: Int = 12): List<Pair<String, String>> =
+        AppCatalog.search(context, query, limit).map { it.label to it.packageName }
+
+    /** 应用总数，用于诊断。 */
+    fun appCount(context: Context): Int = AppCatalog.all(context).size
 }

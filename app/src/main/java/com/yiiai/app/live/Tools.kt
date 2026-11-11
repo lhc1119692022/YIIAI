@@ -26,9 +26,10 @@ object Tools {
     const val KEY = "press_key"
     const val TYPE = "type_text"
     const val OPEN_APP = "open_app"
+    const val LIST_APPS = "list_apps"
 
     /** 需要无障碍服务（眼睛和手）的工具。 */
-    val phoneTools = setOf(LOOK, WATCH, STOP_WATCH, READ, TAP, TAP_ELEMENT, SWIPE, KEY, TYPE, OPEN_APP)
+    val phoneTools = setOf(LOOK, WATCH, STOP_WATCH, READ, TAP, TAP_ELEMENT, SWIPE, KEY, TYPE, OPEN_APP, LIST_APPS)
 
     val all: JsonArray = buildJsonArray {
         add(
@@ -106,6 +107,15 @@ object Tools {
                     integer("index", "可选，read_screen 里标了「可输入」的控件序号")
                 },
                 required = listOf("text"),
+            ),
+        )
+        add(
+            tool(
+                name = LIST_APPS,
+                description = "查设备上装了哪些应用。用户提到某个 App 名字不确定、或 open_app 没找到时先调它。" +
+                    "不传关键词返回前若干个应用名。",
+                readOnly = true,
+                params = { string("query", "可选，按名称或包名过滤，例如「淘宝」「taobao」") },
             ),
         )
         add(

@@ -95,6 +95,15 @@ class PhoneToolRunner(
                 }
             }
             Tools.OPEN_APP -> PhoneUse.launchApp(appContext, args.str("app").orEmpty())
+            Tools.LIST_APPS -> {
+                val query = args.str("query").orEmpty()
+                val hits = PhoneUse.searchApps(appContext, query, 20)
+                if (hits.isEmpty()) {
+                    "没找到匹配「$query」的应用。设备上共 ${PhoneUse.appCount(appContext)} 个可启动应用。"
+                } else {
+                    "找到 ${hits.size} 个：" + hits.joinToString("、") { it.first }
+                }
+            }
             else -> "不认识的工具：$name"
         }
     }

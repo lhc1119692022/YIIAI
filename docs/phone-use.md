@@ -31,7 +31,8 @@ App 内的引导：设置 → **屏幕与应用控制**，页面顶部会显示�
 | `swipe_screen(x1,y1,x2,y2)` | 滑动 / 滚动 | 否 |
 | `press_key(back\|home\|recents\|notifications)` | 系统按键 | 否 |
 | `type_text(text,index?)` | 往输入框里输入文字 | 否 |
-| `open_app(app)` | 按应用名或包名打开 App | 否 |
+| `list_apps(query?)` | 查设备上装了哪些应用，可按关键词过滤 | 是 |
+| `open_app(app)` | 按应用名或包名打开 App，找不到时返回相近名称 | 否 |
 
 调用流程按协议走：`response.function_call_arguments.done` → 本地执行 → `conversation.item.create`（function_call_output）→ 收到 `conversation.item.created` → `response.create`。
 如果服务端没有回 `item.created`，客户端 1.5 秒后自己发 `response.create`，避免这一轮卡住。
@@ -53,8 +54,26 @@ App 内的引导：设置 → **屏幕与应用控制**，页面顶部会显示�
 
 ## 应用列表可见性
 
-Android 11+ 默认看不到别的应用。`AndroidManifest.xml` 里声明了 `<queries>`（MAIN/LAUNCHER），
-没有这段的话 `queryIntentActivities` 只返回自己和系统应用，「打开淘宝」会变成「找不到这个应用」。
+Android 11+ 默认看不到别的应用，这是「打开淘宝却找不到应用」的根因。现在两道都做了：
+
+1. `<queries>` 声明 MAIN/LAUNCHER intent 过滤；
+2. **`QUERY_ALL_PACKAGES` 权限**（应用可见性总开关）。
+
+枚举方式也换了：不再只靠 `queryIntentActivities`，而是
+`getInstalledPackages()` 全量遍历 + `getLaunchIntentForPackage()` 解析启动入口。
+这样被用户冻结、隐藏、或没有 launcher intent 的应用也能查到。
+结果缓存 5 分钟（`AppCatalog`）。
+
+实测：可启动应用 89 个，覆盖全部 88 个 launcher 包与 82 个第三方包。
+
+### 按名字启动的匹配规则
+
+精确包名 → 精确名称 → 去空格同名 → 名称包含关键词（关键词至少 2 个字，取最短命中）。
+
+**不能**做「关键词包含名称」的反向匹配：应用名里有单字母的（如「X」），
+任何带该字母的输入都会被它抢走，结果打开一个完全不相干的应用。
+
+找不到时会返回设备上可启动应用的数量和前 20 个名字，便于模型直接点名重试。
 
 ## 首次启动
 
