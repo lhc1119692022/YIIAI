@@ -6,6 +6,7 @@ import com.yiiai.app.audio.AudioRouting
 import com.yiiai.app.audio.MicStreamer
 import com.yiiai.app.audio.VoicePlayer
 import com.yiiai.app.settings.AppSettings
+import com.yiiai.app.settings.CameraFacing
 import com.yiiai.app.settings.SettingsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -70,7 +71,9 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
     private val _log = MutableStateFlow<List<String>>(emptyList())
     val log: StateFlow<List<String>> = _log.asStateFlow()
 
-    /** 工具执行器：截图 / 点击 / 输入，跑在独立协程里，不阻塞 actor。 */
+    private val cameraCapture = com.yiiai.app.phone.CameraFrameCapture(appContext)
+
+    /** 工具执行器：截图 / 点击 / 输入 / 按需看摄像头，跑在独立协程里，不阻塞 actor。 */
     private val toolRunner = com.yiiai.app.phone.PhoneToolRunner(
         context = appContext,
         sendScreenFrame = { bytes ->
@@ -80,12 +83,21 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
             System.arraycopy(bytes, 0, frame, 1, bytes.size)
             liveSocket?.send(frame.toByteString()) ?: false
         },
+        sendCameraFrame = { bytes ->
+            val frame = ByteArray(bytes.size + 1)
+            frame[0] = LiveProtocol.TAG_CAMERA
+            System.arraycopy(bytes, 0, frame, 1, bytes.size)
+            liveSocket?.send(frame.toByteString()) ?: false
+        },
         sendEvent = { json ->
             val ws = liveSocket
             if (ws == null) false else ws.send(json)
         },
         startWatching = { seconds -> watchScreen(seconds) },
         isWatching = { screenStreamer.running },
+        captureCamera = { facing, onFrame -> cameraCapture.capture(facing, onFrame = onFrame) },
+        visionEnabled = { settings.current.visionEnabled },
+        defaultCameraFacing = { settings.current.cameraFacing },
     )
 
     /**
@@ -171,6 +183,7 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
     fun hangup() { inbox.trySend(Msg.Hangup) }
     fun toggleMute() { inbox.trySend(Msg.ToggleMute) }
     fun toggleSpeaker() { inbox.trySend(Msg.ToggleSpeaker) }
+    fun onVisionSettingsChanged() { inbox.trySend(Msg.VisionSettingsChanged) }
     /** 存储页用：清空对话记录。 */
     fun clearMessages() {
         _messages.value = emptyList()
@@ -201,6 +214,10 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
             }
             Msg.ToggleMute -> toggleMuteInternal()
             Msg.ToggleSpeaker -> toggleSpeakerInternal()
+            Msg.VisionSettingsChanged -> {
+                if (!settings.current.visionEnabled) cameraCapture.stopActiveCapture()
+                if (step == SetupStep.Done) sendVisionInstructions()
+            }
             is Msg.Opened -> if (msg.gen == generation) onOpened()
             is Msg.Text -> if (msg.gen == generation) onText(msg.text)
             is Msg.Binary -> if (msg.gen == generation) onBinary(msg.bytes)
@@ -429,9 +446,22 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
     }
 
     private fun configurePersona() {
-        val s = call ?: return
+        if (call == null) return
         step = SetupStep.Persona
-        send(LiveProtocol.sessionUpdate(s.personaName, s.personaPrompt, s.instructions))
+        sendVisionInstructions()
+    }
+
+    private fun sendVisionInstructions() {
+        val s = call ?: settings.current
+        send(
+            LiveProtocol.sessionUpdate(
+                s.personaName,
+                s.personaPrompt,
+                s.instructions,
+                visionEnabled = settings.current.visionEnabled,
+                cameraFacing = settings.current.cameraFacing,
+            ),
+        )
     }
 
     private fun onSessionUpdated(ev: ServerEvent) {
@@ -687,6 +717,7 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
     /** 只释放本次连接的资源，保留会话 ID、字幕与音频路由。 */
     private fun releaseConnection() {
         stopWatching()
+        cameraCapture.stopActiveCapture()
         generation++
         liveSocket = null
         mic?.stop()
@@ -715,6 +746,7 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
 
     private fun teardown() {
         stopWatching()
+        cameraCapture.stopActiveCapture()
         generation++
         liveSocket = null
         mic?.stop()
@@ -866,6 +898,7 @@ private sealed interface Msg {
     data object Hangup : Msg
     data object ToggleMute : Msg
     data object ToggleSpeaker : Msg
+    data object VisionSettingsChanged : Msg
     class Opened(val gen: Int) : Msg
     class Text(val gen: Int, val text: String) : Msg
     class Binary(val gen: Int, val bytes: ByteArray) : Msg

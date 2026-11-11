@@ -3,25 +3,31 @@ package com.yiiai.app.phone
 import android.content.Context
 import android.util.Log
 import com.yiiai.app.live.Tools
+import com.yiiai.app.settings.CameraFacing
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * 执行模型发来的工具调用。返回给模型的字符串会直接进对话，所以要写人话、带可操作的信息。
  *
- * 截图走 tagged-v1 的 0x02 前缀直接发进实时连接（不是文本），
- * 工具结果只回一句「已经发出屏幕截图」，模型随后就能看到画面。
+ * 屏幕与摄像头 JPEG 分别使用 tagged-v1 的 0x02 / 0x01 前缀直接发进实时连接（不是文本）。
  */
 class PhoneToolRunner(
     private val context: Context,
     /** 发送一帧 tagged-v1 屏幕 JPEG（已带 0x02 前缀）。 */
     private val sendScreenFrame: (ByteArray) -> Boolean,
+    private val sendCameraFrame: (ByteArray) -> Boolean = { false },
     /** 发送一条客户端事件（用于先打开屏幕画面）。 */
     private val sendEvent: (String) -> Boolean = { false },
     /** 开启屏幕实时画面流（视频为主体）。 */
     private val startWatching: (Int) -> Unit = {},
     /** 当前是否已经在推流。 */
     private val isWatching: () -> Boolean = { false },
+    private val captureCamera: suspend (CameraFacing, (ByteArray) -> Boolean) -> Int = { _, _ ->
+        throw IllegalStateException("摄像头采集不可用")
+    },
+    private val visionEnabled: () -> Boolean = { false },
+    private val defaultCameraFacing: () -> CameraFacing = { CameraFacing.Back },
 ) {
     private val appContext = context.applicationContext
 
@@ -30,7 +36,11 @@ class PhoneToolRunner(
         if (name in Tools.phoneTools && svc == null) {
             return "还没开启无障碍服务，看不到也点不了。请让用户在设置里打开「YIIAI的无障碍服务」后再试。"
         }
+        if (name in Tools.visionTools && !visionEnabled()) {
+            return "用户还没有开启视觉功能，不能调用摄像头。请告知用户可在设置中开启「开启视觉」。"
+        }
         return when (name) {
+            Tools.LOOK_CAMERA -> lookAtCamera(args.str("facing"))
             Tools.LOOK -> lookAtScreen(svc!!)
             Tools.WATCH -> {
                 val seconds = args.num("seconds")?.toInt()?.coerceIn(30, 600) ?: 180
@@ -105,6 +115,26 @@ class PhoneToolRunner(
                 }
             }
             else -> "不认识的工具：$name"
+        }
+    }
+
+    private suspend fun lookAtCamera(requestedFacing: String?): String {
+        val facing = when (requestedFacing?.lowercase()) {
+            "front" -> CameraFacing.Front
+            "back" -> CameraFacing.Back
+            else -> defaultCameraFacing()
+        }
+        sendEvent(com.yiiai.app.live.LiveProtocol.videoStreamFocus("camera"))
+        sendEvent(com.yiiai.app.live.LiveProtocol.videoState("camera", true))
+        val count = try {
+            captureCamera(facing, sendCameraFrame)
+        } finally {
+            sendEvent(com.yiiai.app.live.LiveProtocol.videoState("camera", false))
+        }
+        return if (count > 0) {
+            "已通过${facing.label}摄像头发送 $count 帧画面，摄像头已经关闭。请根据刚收到的画面回应用户。"
+        } else {
+            "摄像头已关闭，没有采集到画面。"
         }
     }
 

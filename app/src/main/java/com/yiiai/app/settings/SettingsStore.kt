@@ -11,6 +11,15 @@ import java.util.UUID
 
 data class VoiceOption(val id: String, val label: String)
 
+enum class CameraFacing(val preferenceKey: String, val label: String) {
+    Back("back", "后摄"),
+    Front("front", "前摄");
+
+    companion object {
+        fun fromPreferenceKey(key: String?): CameraFacing = entries.firstOrNull { it.preferenceKey == key } ?: Back
+    }
+}
+
 /** 音色库页面，用于试听和取音色 ID。 */
 const val VOICE_LIBRARY_URL = "https://create.moss.cn/voice/library"
 
@@ -133,6 +142,10 @@ data class AppSettings(
     val apiKeyVerified: Boolean = false,
     /** 无障碍服务是否曾经成功连上过。用于「被系统关掉」的提醒。 */
     val phoneUseEverReady: Boolean = false,
+    /** 允许模型按需短暂调用摄像头。默认关闭。 */
+    val visionEnabled: Boolean = false,
+    /** 未指定镜头时使用的默认摄像头。 */
+    val cameraFacing: CameraFacing = CameraFacing.Back,
 ) {
     val activePersona: Persona
         get() = personas.firstOrNull { it.id == activePersonaId } ?: personas.firstOrNull() ?: Persona.DEFAULT
@@ -241,6 +254,8 @@ class SettingsStore(context: Context) {
             onboardingDone = prefs.getBoolean(K_ONBOARDING, false),
             apiKeyVerified = prefs.getBoolean(K_API_KEY_OK, false),
             phoneUseEverReady = prefs.getBoolean(K_PHONE_READY, false),
+            visionEnabled = prefs.getBoolean(K_VISION_ENABLED, d.visionEnabled),
+            cameraFacing = CameraFacing.fromPreferenceKey(prefs.getString(K_CAMERA_FACING, d.cameraFacing.preferenceKey)),
         )
     }
 
@@ -303,6 +318,8 @@ class SettingsStore(context: Context) {
             putBoolean(K_ONBOARDING, s.onboardingDone)
             putBoolean(K_API_KEY_OK, s.apiKeyVerified)
             putBoolean(K_PHONE_READY, s.phoneUseEverReady)
+            putBoolean(K_VISION_ENABLED, s.visionEnabled)
+            putString(K_CAMERA_FACING, s.cameraFacing.preferenceKey)
             putString(
                 K_CUSTOM_VOICES,
                 s.customVoices.joinToString("\u001F") { "${it.id}\u001E${it.label}" },
@@ -334,5 +351,7 @@ class SettingsStore(context: Context) {
         const val K_ONBOARDING = "onboarding_done"
         const val K_API_KEY_OK = "api_key_verified"
         const val K_PHONE_READY = "phone_use_ever_ready"
+        const val K_VISION_ENABLED = "vision_enabled"
+        const val K_CAMERA_FACING = "camera_facing"
     }
 }

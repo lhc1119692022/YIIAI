@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.yiiai.app.YiiApp
 import com.yiiai.app.live.CallPhase
 import com.yiiai.app.live.CallState
@@ -101,16 +102,31 @@ class LiveCallService : Service() {
 
     private fun enterForeground(state: CallState) {
         val notification = CallNotification.build(this, state, app.settings.current.personaName)
-        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-        } else {
-            0
-        }
+        val type = foregroundServiceType()
         try {
             ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
         } catch (t: Throwable) {
             Log.e(TAG, "startForeground failed", t)
             stopSelfSafely()
+        }
+    }
+
+    private fun foregroundServiceType(): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return 0
+        val microphone = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        val cameraAllowed = app.settings.current.visionEnabled &&
+            ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        return microphone or if (cameraAllowed) ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA else 0
+    }
+
+    private fun refreshCameraForegroundType() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || !live.state.value.phase.isActive) return
+        val notification = CallNotification.build(this, live.state.value, app.settings.current.personaName)
+        try {
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, foregroundServiceType())
+        } catch (t: Throwable) {
+            Log.e(TAG, "update camera foreground type failed", t)
         }
     }
 
@@ -156,6 +172,15 @@ class LiveCallService : Service() {
                 context.startForegroundService(intent)
             } else {
                 context.startService(intent)
+            }
+        }
+
+        fun setCameraEnabled(enabled: Boolean) {
+            val service = instance ?: return
+            service.scope.launch {
+                if (service.app.settings.current.visionEnabled == enabled) {
+                    service.refreshCameraForegroundType()
+                }
             }
         }
 

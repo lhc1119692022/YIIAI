@@ -1,8 +1,14 @@
 package com.yiiai.app.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -133,7 +139,7 @@ fun SettingsScreen(
         }
 
         when (page) {
-            SettingsPage.Root -> RootPage(settings, store, onOpen = { go(it) })
+            SettingsPage.Root -> RootPage(settings, store, live, onOpen = { go(it) })
             SettingsPage.ApiKey -> ApiKeyPage(store)
             SettingsPage.Voice -> VoicePage(store)
             SettingsPage.Persona -> PersonaPage(store)
@@ -166,13 +172,21 @@ private fun pageTitle(page: SettingsPage) = when (page) {
 private fun RootPage(
     settings: com.yiiai.app.settings.AppSettings,
     store: SettingsStore,
+    live: com.yiiai.app.live.LiveSession?,
     onOpen: (SettingsPage) -> Unit,
 ) {
     val palette = LocalYiiPalette.current
     val context = LocalContext.current
     val theme = ThemeMode.of(settings.themeModeKey)
+    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            persistVisionEnabled(store, live, context, true)
+        } else {
+            Toast.makeText(context, "需要相机权限才能开启视觉", Toast.LENGTH_LONG).show()
+        }
+    }
 
-    // 三组：连接、角色、数据
+    // 连接、角色、视觉、数据
     LazyColumn(
         Modifier
             .fillMaxSize()
@@ -247,7 +261,38 @@ private fun RootPage(
 
         item { GroupGap() }
 
-        // ── 第 3 组：数据与关于
+        item {
+            GroupLabel("视觉")
+            SurfaceCard {
+                InlineSwitchRow(
+                    title = "开启视觉",
+                    detail = "模型按需调用摄像头看几帧，完成后立即关闭；不会持续采集。",
+                    checked = settings.visionEnabled,
+                    onToggle = { enabled ->
+                        if (!enabled) {
+                            persistVisionEnabled(store, live, context, false)
+                        } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                            PackageManager.PERMISSION_GRANTED
+                        ) {
+                            persistVisionEnabled(store, live, context, true)
+                        } else {
+                            cameraPermission.launch(Manifest.permission.CAMERA)
+                        }
+                    },
+                )
+                if (settings.visionEnabled) {
+                    RowDivider()
+                    CameraFacingSelector(
+                        selected = settings.cameraFacing,
+                        onSelect = { facing -> store.update { it.copy(cameraFacing = facing) } },
+                    )
+                }
+            }
+        }
+
+        item { GroupGap() }
+
+        // ── 第 4 组：数据与关于
         item {
             GroupLabel("数据")
             SurfaceCard {
@@ -404,6 +449,57 @@ private fun InlineSwitchRow(
             modifier = Modifier.padding(top = 4.dp, end = 8.dp),
         )
     }
+}
+
+@Composable
+private fun CameraFacingSelector(
+    selected: com.yiiai.app.settings.CameraFacing,
+    onSelect: (com.yiiai.app.settings.CameraFacing) -> Unit,
+) {
+    val palette = LocalYiiPalette.current
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 11.dp)) {
+        Text("默认摄像头", color = palette.text, fontSize = 14.sp)
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 9.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(palette.surfaceRaised)
+                .padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            com.yiiai.app.settings.CameraFacing.entries.forEach { facing ->
+                val active = selected == facing
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (active) palette.accent else androidx.compose.ui.graphics.Color.Transparent)
+                        .clickable { onSelect(facing) }
+                        .padding(vertical = 9.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        facing.label,
+                        color = if (active) palette.onAccent() else palette.textDim,
+                        fontSize = 13.sp,
+                        fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun persistVisionEnabled(
+    store: SettingsStore,
+    live: com.yiiai.app.live.LiveSession?,
+    context: android.content.Context,
+    enabled: Boolean,
+) {
+    store.update { it.copy(visionEnabled = enabled) }
+    live?.onVisionSettingsChanged()
+    com.yiiai.app.call.LiveCallService.setCameraEnabled(enabled)
 }
 
 /** 外观：横排三选一（系统 / 浅色 / 深色）。 */

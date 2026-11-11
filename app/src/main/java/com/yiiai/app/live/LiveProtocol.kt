@@ -9,6 +9,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
+import com.yiiai.app.settings.CameraFacing
 import java.net.URLEncoder
 
 /**
@@ -44,10 +45,26 @@ object LiveProtocol {
     /**
      * 人设 / 指令 / 工具。工具必须下发，所以即使三样人设字段都为空也要发。
      */
-    fun sessionUpdate(personaName: String, personaPrompt: String, instructions: String): String {
+    fun sessionUpdate(
+        personaName: String,
+        personaPrompt: String,
+        instructions: String,
+        visionEnabled: Boolean = false,
+        cameraFacing: CameraFacing = CameraFacing.Back,
+    ): String {
         val name = personaName.trim()
         val prompt = personaPrompt.trim()
-        val instr = instructions.trim()
+        val visionPolicy = if (visionEnabled) {
+            "摄像头视觉已由用户开启。用户只说「你看」「快看」且没有明确提到手机屏幕时，调用 look_at_camera 获取最多 3 帧后继续对话；" +
+                "明确讨论手机屏幕或当前应用时使用 look_at_screen。摄像头工具结束会自动关闭镜头，不要持续请求。" +
+                "需要切换时 facing 用 front（前摄）或 back（后摄）；省略时默认使用${cameraFacing.label}。"
+        } else {
+            "摄像头视觉当前关闭。不要调用 look_at_camera，也不要尝试开启摄像头；只有用户在设置中开启后才可使用。" +
+                "用户明确讨论手机屏幕或当前应用时，仍使用 look_at_screen。"
+        }
+        val baseInstructions = instructions.trim()
+        val instr = (baseInstructions.take((MAX_INSTRUCTION_CHARS - visionPolicy.length - 2).coerceAtLeast(0)) +
+            if (baseInstructions.isBlank()) visionPolicy else "\n\n$visionPolicy")
         return event("session.update") {
             putJsonObject("session") {
                 if (name.isNotEmpty() || prompt.isNotEmpty()) {
@@ -84,7 +101,7 @@ object LiveProtocol {
         putJsonObject("input_audio") {
             put("format", "pcm16")
         }
-        // 屏幕画面要能看清文字：长边 1024、质量 0.8。
+        // 屏幕与摄像头画面：长边 1024、JPEG 质量 0.8。
         // 注意服务端要求 jpeg_quality 在 0.1..1 之间，传 80 会被整条 media.configure 拒绝。
         putJsonObject("video") {
             put("max_long_side", 1024)
@@ -101,6 +118,8 @@ object LiveProtocol {
         put("source", source)
         put("enabled", enabled)
     }
+
+    fun videoStreamFocus(source: String) = event("video.stream_focus") { put("source", source) }
 
     fun clientContext(timeZone: String) = event("client_context.update") {
         putJsonObject("context") { put("time_zone", timeZone) }

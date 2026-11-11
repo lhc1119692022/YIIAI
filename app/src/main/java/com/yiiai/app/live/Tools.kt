@@ -27,18 +27,31 @@ object Tools {
     const val TYPE = "type_text"
     const val OPEN_APP = "open_app"
     const val LIST_APPS = "list_apps"
+    const val LOOK_CAMERA = "look_at_camera"
 
     /** 需要无障碍服务（眼睛和手）的工具。 */
     val phoneTools = setOf(LOOK, WATCH, STOP_WATCH, READ, TAP, TAP_ELEMENT, SWIPE, KEY, TYPE, OPEN_APP, LIST_APPS)
+    val visionTools = setOf(LOOK_CAMERA)
 
     val all: JsonArray = buildJsonArray {
         add(
             tool(
                 name = LOOK,
-                description = "看一眼用户此刻的屏幕，并开始持续接收画面：用户换页面、滚动、点开别的东西，" +
-                    "你都会接着看到。用户问「这个怎么样」「你看这个」、或需要讨论屏幕上任何东西时调用。" +
-                    "首选这个工具；read_screen 只在需要精确找按钮坐标时作为辅助。",
+                description = "看一眼用户此刻的手机屏幕，并开始持续接收画面：用户换页面、滚动、点开别的东西，" +
+                    "你都会接着看到。仅当用户明确在说手机屏幕、当前应用或屏幕上的内容时调用；" +
+                    "如果用户只是说「你看」「快看」且没有提到手机屏幕，视觉已开启时应使用 look_at_camera。" +
+                    "read_screen 只在需要精确找按钮坐标时作为辅助。",
                 readOnly = true,
+            ),
+        )
+        add(
+            tool(
+                name = LOOK_CAMERA,
+                description = "按需短暂打开手机摄像头并发送最多 3 帧画面，然后立即关闭摄像头。用户说「你看一下」「快看这里」、" +
+                    "希望你看周围环境或进行面对面视频交流时调用；只在用户已开启视觉时使用。默认用用户设置的镜头，" +
+                    "用户要求自拍/看自己时指定 front，要求看环境/后置时指定 back。不要把它当作持续直播。",
+                readOnly = true,
+                params = { enumString("facing", "可选镜头：front 前摄，back 后摄；省略时使用用户默认设置", listOf("front", "back")) },
             ),
         )
         add(
@@ -163,5 +176,11 @@ object Tools {
     private fun JsonObjectBuilder.integer(name: String, desc: String) = putJsonObject(name) {
         put("type", "integer")
         put("description", desc)
+    }
+
+    private fun JsonObjectBuilder.enumString(name: String, desc: String, values: List<String>) = putJsonObject(name) {
+        put("type", "string")
+        put("description", desc)
+        putJsonArray("enum") { values.forEach { add(JsonPrimitive(it)) } }
     }
 }
