@@ -20,8 +20,7 @@ import java.util.concurrent.TimeUnit
  * 更新源是 GitHub Releases：`releases/latest` 给出最新版本号和 APK 下载地址，
  * 不用自己搭服务端。下载走 OkHttp，装完由系统安装器接管。
  *
- * 注意：Android 8+ 要求「安装未知来源应用」权限，且必须用 FileProvider 把
- * 缓存目录里的 APK 暴露给安装器，不能直接传 file://。
+ * Android 8+ 需要用户在系统设置中允许本应用安装未知来源应用；APK 通过 PackageInstaller 会话提交。
  */
 object Updater {
 
@@ -189,15 +188,8 @@ object Updater {
             true
         }
 
-    fun openInstallPermission(context: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        runCatching {
-            context.startActivity(
-                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}"))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
-        }
-    }
+    fun installPermissionIntent(context: Context): Intent =
+        Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}"))
 
     /**
      * 申请安装：用 PackageInstaller 会话，把下载好的 APK 交给系统安装器。

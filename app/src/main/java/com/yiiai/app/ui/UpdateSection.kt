@@ -1,6 +1,8 @@
 package com.yiiai.app.ui
 
 import android.text.format.DateFormat
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -50,6 +52,16 @@ fun UpdateSection(modifier: Modifier = Modifier) {
     var progress by remember { mutableStateOf(0f) }
     var downloaded by remember { mutableStateOf<java.io.File?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
+    val installPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        val apk = downloaded
+        when {
+            apk == null -> message = "安装包已不可用，请重新下载。"
+            Updater.canInstall(context) -> install(context, apk) { message = it }
+            else -> message = "尚未允许 YIIAI 安装未知应用。开启权限后返回并再次点击安装。"
+        }
+    }
 
     val release = (state as? Updater.UpdateResult.Available)?.release
 
@@ -73,7 +85,16 @@ fun UpdateSection(modifier: Modifier = Modifier) {
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier
                         .clip(RoundedCornerShape(10.dp))
-                        .clickable { install(context, downloaded!!) { message = it } }
+                        .clickable {
+                            val apk = downloaded ?: return@clickable
+                            if (Updater.canInstall(context)) {
+                                install(context, apk) { message = it }
+                            } else {
+                                message = "请在系统设置中开启“允许来自此来源的应用”，返回后会继续安装。"
+                                runCatching { installPermissionLauncher.launch(Updater.installPermissionIntent(context)) }
+                                    .onFailure { message = "无法打开安装权限设置：${it.message ?: "请手动前往系统设置开启"}" }
+                            }
+                        }
                         .padding(horizontal = 10.dp, vertical = 6.dp),
                 )
                 else -> Text(
