@@ -118,8 +118,13 @@ class OverlayService : Service() {
                     PixelFormat.TRANSLUCENT,
                 ).apply {
                     gravity = Gravity.TOP or Gravity.START
-                    x = prefs.getInt(K_X, metrics.widthPixels - sizePx - (12 * density).toInt())
+                    // 只记住贴在哪一边和高度；横向位置按当前窗口大小重新贴边。
+                    val edge = -(EDGE_OVERHANG_DP * density).toInt()
+                    val left = prefs.contains(K_X) && prefs.getInt(K_X, 0) + sizePx / 2 < metrics.widthPixels / 2
+                    x = if (left) edge else metrics.widthPixels - sizePx - edge
                     y = prefs.getInt(K_Y, (metrics.heightPixels * 0.35f).toInt())
+                        .coerceIn(0, metrics.heightPixels - sizePx)
+                    _dockedLeft.value = left
                 }
             }
             OverlayMode.Island -> {
@@ -188,9 +193,12 @@ class OverlayService : Service() {
         val view = mainView ?: return
         val metrics = resources.displayMetrics
         val margin = (8 * metrics.density).toInt()
-        val maxX = metrics.widthPixels - params.width - margin
+        val edge = -(EDGE_OVERHANG_DP * metrics.density).toInt()
+        val maxX = metrics.widthPixels - params.width - edge
         val maxY = metrics.heightPixels - params.height - margin
-        params.x = if (params.x + params.width / 2 < metrics.widthPixels / 2) margin else maxX
+        val left = params.x + params.width / 2 < metrics.widthPixels / 2
+        params.x = if (left) edge else maxX
+        _dockedLeft.value = left
         params.y = params.y.coerceIn(margin, maxY)
         runCatching { wm.updateViewLayout(view, params) }
         prefs.edit().putInt(K_X, params.x).putInt(K_Y, params.y).apply()
@@ -303,7 +311,10 @@ class OverlayService : Service() {
 
     companion object {
         private const val TAG = "YIIAI.Overlay"
-        private const val BUBBLE_DP = 76
+        private const val BUBBLE_DP = 112
+
+        /** 窗口比小鹿本身大一圈（给气泡和声波留位置），贴边时让这部分空白探出屏幕外。 */
+        private const val EDGE_OVERHANG_DP = 12
         private const val K_X = "bubble_x"
         private const val K_Y = "bubble_y"
         private const val EXTRA_MODE = "mode"
@@ -314,6 +325,11 @@ class OverlayService : Service() {
             private set
 
         private val _mode = MutableStateFlow<OverlayMode?>(null)
+
+        private val _dockedLeft = MutableStateFlow(false)
+
+        /** 悬浮球贴在屏幕左边还是右边；小鹿据此朝屏幕里面看。 */
+        val dockedLeft: StateFlow<Boolean> = _dockedLeft.asStateFlow()
 
         /** 当前显示的形态；null 表示没有悬浮窗。首页「悬浮」按钮据此切换高亮。 */
         val mode: StateFlow<OverlayMode?> = _mode.asStateFlow()

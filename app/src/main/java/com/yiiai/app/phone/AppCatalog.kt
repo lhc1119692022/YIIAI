@@ -191,6 +191,9 @@ object AppCatalog {
             }
             ?: return "「${entry.label}」没有可启动的界面"
 
+        // 没有无障碍、也没有使用情况权限：看不到前台是谁，换一套不依赖它的确认办法。
+        if (!ForegroundApp.canObserve(context)) return launchBlind(context, entry, intent)
+
         // 第一轮：常规启动 + 等待确认
         start(context, intent)
         if (awaitForeground(context, entry.packageName, 1800)) return "已打开 ${entry.label}"
@@ -242,6 +245,54 @@ object AppCatalog {
                 append("启动被系统拦下了，可能是应用需要登录、正在更新，或被系统冻结。")
             }
             append("不要对用户说已打开，如实说明没打开。")
+        }
+    }
+
+    /**
+     * 只靠应用列表打开应用（没有无障碍服务时）。
+     *
+     * 找应用、发起启动都不需要无障碍；缺的只是「确认它真的到了前台」。能确认到什么程度取决于 YIIAI 在哪：
+     * - YIIAI 自己在前台：打开成功后自己会被盖住，据此确认；
+     * - YIIAI 在后台（用户正在用别的应用）：系统可能悄悄拦下这次启动，而我们无从得知，只能如实说明。
+     */
+    private suspend fun launchBlind(context: Context, entry: Entry, intent: Intent): String {
+        val wasForeground = SelfForeground.isForeground
+        if (!start(context, intent)) {
+            return "「${entry.label}」打不开：应用可能已被冻结、隐藏或停用，需要先在系统里恢复。"
+        }
+        if (wasForeground) {
+            var waited = 0L
+            while (waited < 2500L && SelfForeground.isForeground) {
+                kotlinx.coroutines.delay(100)
+                waited += 100
+            }
+            if (SelfForeground.isForeground) {
+                return buildString {
+                    append("没能打开「${entry.label}」：发出了打开请求，但屏幕上还是 YIIAI。")
+                    if (isStopped(context, entry.packageName)) {
+                        append("这个应用处于「强制停止」状态，请让用户自己在桌面点开一次，之后就能正常打开。")
+                    } else {
+                        append("可能被系统拦下了。")
+                    }
+                    append("不要对用户说已打开。")
+                }
+            }
+            // 被盖住之后又马上回来：多半是系统弹了确认框而用户点了拒绝。
+            kotlinx.coroutines.delay(1200)
+            if (SelfForeground.isForeground) {
+                return "没能打开「${entry.label}」：系统弹出了确认框，但没有被允许。不要对用户说已打开。"
+            }
+            return "已打开「${entry.label}」。"
+        }
+        // 等一会儿看前台有没有被盖住：MUI 一般会先弹「是否允许」确认框，那个界面会把桌面盖住。
+        kotlinx.coroutines.delay(1500)
+        val overlay = hasOverlayPermission(context)
+        return buildString {
+            append("已经发出打开「${entry.label}」的请求。")
+            append("没有无障碍服务、也不在 YIIAI 界面里，只能间接判断：")
+            append(if (overlay) "如果刚才弹出了「是否允许 YIIAI 打开」，用户点允许就会打开；" else "缺少「显示在其他应用上层」权限时，系统通常会在后台直接拦下；")
+            append("确认一下用户现在看到的是不是${entry.label}。没打开的话，请用户回到 YIIAI 再说一次，")
+            append("或者打开「屏幕与应用控制」或「使用情况访问」，我才能直接确认。")
         }
     }
 

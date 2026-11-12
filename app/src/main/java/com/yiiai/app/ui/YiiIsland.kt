@@ -72,6 +72,8 @@ fun YiiIsland(
     onHangup: () -> Unit,
     onOpen: () -> Unit,
     modifier: Modifier = Modifier,
+    /** 停止看屏幕 / 关闭摄像头；为 null 时不显示「停止」。 */
+    onStopLooking: (() -> Unit)? = null,
 ) {
     val palette = LocalYiiPalette.current
     val status = islandStatus(state, palette)
@@ -188,6 +190,45 @@ fun YiiIsland(
                     }
                     if (lastUser == null && lastAi == null) {
                         Text("开口就好", color = palette.textDim, fontSize = 12.sp)
+                    }
+                }
+                // 正在看屏幕或开着摄像头：说清楚在看什么、还剩多久，并且能当场停掉。
+                if (state.watchingScreen || state.cameraActive) {
+                    val camera = state.cameraActive
+                    val left = secondsLeft(if (camera) state.cameraEndsAt else state.watchEndsAt)
+                    Row(
+                        Modifier
+                            .padding(top = 10.dp)
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background((if (camera) palette.danger else palette.orbUser).copy(alpha = 0.14f))
+                            .padding(start = 12.dp, end = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            when {
+                                camera -> "${state.cameraFacing.ifBlank { "摄像头" }}开着 · 剩 ${clockText(left)}"
+                                state.watchPaused -> "看屏幕暂停中 · 剩 ${clockText(left)}"
+                                else -> "正在看屏幕 · 剩 ${clockText(left)}"
+                            },
+                            color = if (camera) palette.danger else palette.orbUser,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(vertical = 9.dp),
+                        )
+                        if (onStopLooking != null) {
+                            Text(
+                                "停止",
+                                color = palette.danger,
+                                fontSize = 12.sp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable(onClick = onStopLooking)
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                            )
+                        }
                     }
                 }
                 Row(

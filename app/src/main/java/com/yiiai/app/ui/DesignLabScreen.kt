@@ -151,15 +151,63 @@ fun DesignLabScreen(initialPage: Int = 0) {
                     Box(
                         Modifier
                             .align(Alignment.BottomEnd)
-                            .padding(end = 26.dp, bottom = 16.dp)
-                            .size(64.dp)
-                            .clip(androidx.compose.foundation.shape.CircleShape),
+                            .padding(end = 10.dp, bottom = 4.dp)
+                            .size(112.dp),
                     ) {
-                        DeerMark(
-                            modifier = Modifier.fillMaxSize(),
+                        DeerFloat(
+                            eyes = DeerEyes.Closed,
                             glow = palette.orbHalo,
-                            withTile = true,
+                            level = 0f,
+                            energy = 1f,
+                            earMood = 0f,
+                            faceRight = false,
+                            lean = 0f,
+                            scale = 1f,
+                            idle = true,
                         )
+                    }
+                }
+            }
+        }
+
+        item {
+            // 悬浮小鹿没人说话时的小动作：每格固定在动作中段，方便对照；最上面一行是会动的实况。
+            LabSection("FLOATING IDLE / 悬浮小动作") {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    IdleAct.entries.chunked(3).forEachIndexed { rowIndex, row ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            row.forEachIndexed { col, act ->
+                                Column(
+                                    Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(18.dp))
+                                        // 一半放在浅色底、一半放在深色底上，确认两种背景都看得清。
+                                        .background(if ((rowIndex + col) % 2 == 0) Color(0xFFFFFFFF) else Color(0xFF20261D)),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
+                                    Box(Modifier.size(104.dp)) {
+                                        DeerFloat(
+                                            eyes = DeerEyes.Closed,
+                                            glow = palette.orbHalo,
+                                            level = 0f,
+                                            energy = 1f,
+                                            earMood = 0f,
+                                            faceRight = col == 2,
+                                            lean = 0f,
+                                            scale = 1f,
+                                                            idle = false,
+                                            preview = act to 0.58f,
+                                        )
+                                    }
+                                    Text(
+                                        act.label,
+                                        color = if ((rowIndex + col) % 2 == 0) Color(0xFF7D8473) else Color(0xFF99A18E),
+                                        fontSize = 11.sp,
+                                        modifier = Modifier.padding(bottom = 8.dp),
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -105,10 +105,10 @@ class MainActivity : ComponentActivity() {
         }
         debugExtras?.getStringExtra("set_api_key")?.let { key ->
             if (key.isNotBlank() && savedInstanceState == null) {
-                app.settings.update { it.copy(apiKey = key.trim()) }
+                app.settings.saveVerifiedApiKey(key)
             }
         }
-        debugExtras?.getStringExtra("probe_phone")?.let { runPhoneProbe(it) }
+        debugExtras?.let { runDebugProbes(it) }
         debugExtras?.getStringExtra("probe_voice")?.let { id ->
             // 调试：用已保存的 Key 查一次音色名，结果和原始响应都打到 logcat（YIIAI.Voice）。
             lifecycleScope.launch {
@@ -273,7 +273,6 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         if (!BuildConfig.DEBUG) return
         setIntent(intent)
-        intent.getStringExtra("probe_phone")?.let { runPhoneProbe(it) }
         // 已在运行时的重新启动也要能触发自动通话，方便验证。
         if (intent.hasExtra("design_lab")) {
             designLabOverride.value = intent.getBooleanExtra("design_lab", false)
@@ -290,8 +289,54 @@ class MainActivity : ComponentActivity() {
             finish()
         }
         if (intent.getBooleanExtra("auto_start", false)) startCall()
+        runDebugProbes(intent)
+    }
+
+    /**
+     * 仅 debug 构建的调试探针。onCreate 和 onNewIntent 都调用，所以冷启动和热启动都能用；
+     * 参数见类注释。release 包不会执行（BuildConfig.DEBUG 为 false）。
+     */
+    private fun runDebugProbes(intent: android.content.Intent) {
+        if (!BuildConfig.DEBUG) return
+        intent.getStringExtra("probe_phone")?.let { runPhoneProbe(it) }
+        intent.getStringExtra("probe_vision")?.let { v ->
+            val on = v != "false"
+            app.settings.update { it.copy(visionEnabled = on) }
+            app.live.onVisionSettingsChanged()
+            android.util.Log.i("YIIAI.PhoneUse", "probe vision=$on")
+        }
+        intent.getStringExtra("probe_companion")?.let { key ->
+            app.settings.update { it.copy(companion = com.yiiai.app.settings.CompanionMode.of(key)) }
+            app.live.onSettingsChanged()
+        }
+        if (intent.getBooleanExtra("probe_nudge", false)) app.live.debugNudge()
+        if (intent.getBooleanExtra("probe_hangup", false)) app.live.hangup()
+        intent.getStringExtra("probe_tool")?.let { name ->
+            app.live.debugRunTool(name, intent.getStringExtra("probe_args") ?: "{}")
+        }
+        intent.getStringExtra("probe_later_tool")?.let { name ->
+            val args = intent.getStringExtra("probe_args") ?: "{}"
+            val delayMs = intent.getLongExtra("probe_delay", 0L)
+            lifecycleScope.launch {
+                if (delayMs > 0) kotlinx.coroutines.delay(delayMs)
+                app.live.debugRunTool(name, args)
+            }
+        }
+        intent.getStringExtra("probe_bg_tool")?.let { name ->
+            val args = intent.getStringExtra("probe_args") ?: "{}"
+            moveTaskToBack(true)
+            lifecycleScope.launch {
+                kotlinx.coroutines.delay(2000)
+                android.util.Log.i(
+                    "YIIAI.PhoneUse",
+                    "bg tool=$name args=$args fg=${com.yiiai.app.phone.SelfForeground.isForeground} " +
+                        "canObserve=${com.yiiai.app.phone.ForegroundApp.canObserve(this@MainActivity)}",
+                )
+                app.live.debugRunTool(name, args)
+            }
+        }
         intent.getStringExtra("probe_watch")?.let { seconds ->
-            app.live.setWatching(true)
+            app.live.extendWatching(seconds.toIntOrNull() ?: 300)
             android.util.Log.i("YIIAI.PhoneUse", "watch on=$seconds watching=${app.live.isWatching}")
         }
     }

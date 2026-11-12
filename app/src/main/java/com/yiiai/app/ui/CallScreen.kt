@@ -8,6 +8,10 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -106,6 +110,21 @@ fun CallScreen(
         else -> OrbMode.Idle
     }
     val orbLevel = if (state.assistantSpeaking) levels.assistant else levels.user
+    // 摄像头开着且首页可见时才解码预览帧；离开首页或退到后台就停。
+    val cameraPreview by live.cameraPreview.collectAsStateWithLifecycle()
+    androidx.lifecycle.compose.LifecycleStartEffect(state.cameraActive) {
+        live.setCameraPreviewWanted(state.cameraActive)
+        onStopOrDispose { live.setCameraPreviewWanted(false) }
+    }
+    val orbTap = {
+        when {
+            !inCall -> onStartCall()
+            state.phase == CallPhase.Failed -> live.dismissError()
+            state.phase == CallPhase.Live -> live.toggleMute()
+            else -> Unit
+        }
+    }
+    val orbLongPress = { if (inCall) live.hangup() }
 
     Box(
         Modifier
@@ -117,21 +136,39 @@ fun CallScreen(
             Spacer(Modifier.height(72.dp))
             Spacer(Modifier.weight(1f))
 
-            VoiceOrb(
-                mode = orbMode,
-                level = orbLevel,
-                sizeDp = 300,
-                onTap = {
-                    when {
-                        !inCall -> onStartCall()
-                        state.phase == CallPhase.Failed -> live.dismissError()
-                        state.phase == CallPhase.Live -> live.toggleMute()
-                        else -> Unit
+            // 中间区域：平时是小鹿；摄像头开着时换成镜头画面，小鹿缩到角上。
+            Box(
+                Modifier
+                    .size(300.dp)
+                    .align(Alignment.CenterHorizontally),
+                contentAlignment = Alignment.Center,
+            ) {
+                androidx.compose.animation.Crossfade(
+                    targetState = state.cameraActive,
+                    animationSpec = androidx.compose.animation.core.tween(260),
+                    label = "orb-camera",
+                ) { showCamera ->
+                    if (showCamera) {
+                        CameraStage(
+                            frame = cameraPreview,
+                            facing = state.cameraFacing,
+                            endsAt = state.cameraEndsAt,
+                            orbMode = orbMode,
+                            onTap = orbTap,
+                            onLongPress = orbLongPress,
+                            onClose = { live.stopCameraByUser() },
+                        )
+                    } else {
+                        VoiceOrb(
+                            mode = orbMode,
+                            level = orbLevel,
+                            sizeDp = 300,
+                            onTap = orbTap,
+                            onLongPress = orbLongPress,
+                        )
                     }
-                },
-                onLongPress = { if (inCall) live.hangup() },
-                modifier = Modifier.align(Alignment.CenterHorizontally),
-            )
+                }
+            }
 
             Column(
                 Modifier
@@ -140,6 +177,14 @@ fun CallScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 StatusChip(orbMode, hintFor(state, assistantName))
+                AnimatedVisibility(visible = state.watchingScreen, enter = fadeIn(), exit = fadeOut()) {
+                    WatchChip(
+                        endsAt = state.watchEndsAt,
+                        paused = state.watchPaused,
+                        onExtend = { live.extendWatching() },
+                        onStop = { live.stopWatchingByUser() },
+                    )
+                }
                 state.notice?.let {
                     Text(
                         it,
@@ -606,3 +651,173 @@ private fun HistorySheet(messages: List<ChatMessage>, assistantName: String, onC
 }
 
 
+/** 距离 [endsAt] 还剩多少秒，每半秒刷新一次。 */
+@Composable
+internal fun secondsLeft(endsAt: Long): Int {
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(endsAt) {
+        while (true) {
+            now = System.currentTimeMillis()
+            kotlinx.coroutines.delay(500)
+        }
+    }
+    return ((endsAt - now + 999) / 1000).toInt().coerceAtLeast(0)
+}
+
+internal fun clockText(seconds: Int): String = "%d:%02d".format(seconds / 60, seconds % 60)
+
+/** 正在看屏幕：剩余时间 + 再看一会儿 + 停止。 */
+@Composable
+private fun WatchChip(endsAt: Long, paused: Boolean, onExtend: () -> Unit, onStop: () -> Unit) {
+    val palette = LocalYiiPalette.current
+    val left = secondsLeft(endsAt)
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Row(
+        Modifier
+            .padding(top = 10.dp)
+            .clip(RoundedCornerShape(50))
+            .background(palette.orbUser.copy(alpha = 0.14f))
+            .padding(start = 14.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            if (paused) "看屏幕暂停中 · 剩 ${clockText(left)}" else "正在看屏幕 · 剩 ${clockText(left)}",
+            color = palette.orbUser,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(vertical = 8.dp),
+        )
+        Text(
+            "加 3 分钟",
+            color = palette.text,
+            fontSize = 12.sp,
+            modifier = Modifier
+                .padding(start = 6.dp)
+                .clip(RoundedCornerShape(50))
+                .clickable(onClick = onExtend)
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+        )
+        Text(
+            "停止",
+            color = palette.danger,
+            fontSize = 12.sp,
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .clickable(onClick = onStop)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+        )
+    }
+    if (paused) {
+        // YIIAI 自己在前台时没有别的画面可发，倒计时也停住。
+        Text(
+            "现在显示的是 YIIAI 自己，切到别的应用后继续发送画面",
+            color = palette.textDim,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+    }
+    }
+}
+
+/**
+ * 摄像头开着时占据首页中间的画面：让用户看到镜头此刻在拍什么。
+ * 小鹿缩到左下角继续反映通话状态；轻点 / 长按和小鹿一样（静音 / 挂断），右上角可以直接关掉镜头。
+ */
+@Composable
+private fun CameraStage(
+    frame: android.graphics.Bitmap?,
+    facing: String,
+    endsAt: Long,
+    orbMode: OrbMode,
+    onTap: () -> Unit,
+    onLongPress: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val palette = LocalYiiPalette.current
+    val left = secondsLeft(endsAt)
+    // 镜头关闭、画面淡出的那一瞬间继续显示最后一帧，不要闪回「正在打开」。
+    var lastFrame by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    if (frame != null) lastFrame = frame
+    val shown = frame ?: lastFrame
+    val shape = RoundedCornerShape(36.dp)
+    val tap by androidx.compose.runtime.rememberUpdatedState(onTap)
+    val longPress by androidx.compose.runtime.rememberUpdatedState(onLongPress)
+    val ring = when (orbMode) {
+        OrbMode.AssistantSpeaking -> palette.orbAssistant
+        OrbMode.Muted -> palette.orbIdle
+        OrbMode.Error -> palette.danger
+        else -> palette.orbUser
+    }
+    val ringColor by androidx.compose.animation.animateColorAsState(ring, label = "camera-ring")
+    Box(
+        Modifier
+            .size(width = 252.dp, height = 300.dp)
+            .clip(shape)
+            .background(androidx.compose.ui.graphics.Color(0xFF12100E))
+            .border(2.dp, ringColor, shape)
+            .pointerInput(Unit) { detectTapGestures(onTap = { tap() }, onLongPress = { longPress() }) },
+    ) {
+        if (shown != null) {
+            androidx.compose.foundation.Image(
+                bitmap = remember(shown) { shown.asImageBitmap() },
+                contentDescription = "摄像头画面",
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Text(
+                "正在打开摄像头…",
+                color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.7f),
+                fontSize = 13.sp,
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
+        // 左上：镜头 + 倒计时
+        Row(
+            Modifier
+                .align(Alignment.TopStart)
+                .padding(10.dp)
+                .clip(RoundedCornerShape(50))
+                .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.45f))
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(palette.danger),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "${facing.ifBlank { "摄像头" }} · ${clockText(left)}",
+                color = androidx.compose.ui.graphics.Color.White,
+                fontSize = 11.sp,
+            )
+        }
+        // 右上：关闭镜头
+        Text(
+            "关闭",
+            color = androidx.compose.ui.graphics.Color.White,
+            fontSize = 12.sp,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp)
+                .clip(RoundedCornerShape(50))
+                .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.45f))
+                .clickable(onClick = onClose)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+        )
+        // 左下：小鹿还在，表情跟着通话状态走
+        DeerMark(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(10.dp)
+                .size(46.dp)
+                .clip(CircleShape),
+            glow = ringColor,
+            withTile = true,
+            eyes = orbMode.toDeerEyes(),
+        )
+    }
+}

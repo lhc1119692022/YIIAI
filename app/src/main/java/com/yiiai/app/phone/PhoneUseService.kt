@@ -12,6 +12,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
@@ -212,10 +213,17 @@ class PhoneUseService : AccessibilityService() {
      * 截图，长边缩到 [maxSide]，JPEG 质量 [quality]。
      * 失败（页面禁止截屏 / 服务未就绪）返回 null 和一句原因。
      */
-    suspend fun screenshot(maxSide: Int = 1024, quality: Int = 80): Pair<ByteArray?, String> {
+    suspend fun screenshot(maxSide: Int = 1024, quality: Int = 80): Pair<ByteArray?, String> = shotLock.withLock {
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) {
-            return null to "系统版本低于 Android 11，无障碍截图不可用"
+            return@withLock null to "系统版本低于 Android 11，无障碍截图不可用"
         }
+        // 系统规定两次截图至少间隔约 333 ms，太密会直接失败。
+        // 画面流和工具都会截图，这里排队并补足间隔，避免把「太频繁」误报成「页面禁止截屏」。
+        val wait = MIN_SHOT_INTERVAL_MS - (android.os.SystemClock.elapsedRealtime() - lastShotAt)
+        if (wait > 0) kotlinx.coroutines.delay(wait)
+        // 系统按「发起请求」的时间计算间隔，所以从这里开始计时，缩放和编码的时间不占用配额。
+        lastShotAt = android.os.SystemClock.elapsedRealtime()
+        var failure = 0
         val shot = suspendCancellableCoroutine<Bitmap?> { cont ->
             takeScreenshot(
                 android.view.Display.DEFAULT_DISPLAY,
@@ -229,11 +237,20 @@ class PhoneUseService : AccessibilityService() {
 
                     override fun onFailure(errorCode: Int) {
                         Log.w(TAG, "screenshot failed code=$errorCode")
+                        failure = errorCode
                         if (cont.isActive) cont.resume(null)
                     }
                 },
             )
-        } ?: return null to "截图失败：当前页面不允许截屏（支付、银行、部分视频 App 会这样）"
+        }
+        if (shot == null) {
+            return@withLock null to when (failure) {
+                ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT -> "截图太频繁，稍等一下再试"
+                ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS -> "截图失败：无障碍服务没有截屏权限，请重新打开服务"
+                ERROR_TAKE_SCREENSHOT_INVALID_DISPLAY -> "截图失败：找不到屏幕"
+                else -> "截图失败：当前页面不允许截屏（支付、银行、部分视频 App 会这样）"
+            }
+        }
 
         val scaled = withContext(Dispatchers.Default) {
             val longSide = maxOf(shot.width, shot.height)
@@ -249,13 +266,19 @@ class PhoneUseService : AccessibilityService() {
             out.recycle()
             bytes
         }
-        return scaled to ""
+        scaled to ""
     }
+
+    private val shotLock = kotlinx.coroutines.sync.Mutex()
+    private var lastShotAt = 0L
 
     private fun moreExecutor() = java.util.concurrent.Executor { it.run() }
 
     companion object {
         private const val TAG = "YIIAI.PhoneUse"
+
+        /** 系统限制是 333 ms，留一点余量。 */
+        private const val MIN_SHOT_INTERVAL_MS = 340L
 
         @Volatile
         var instance: PhoneUseService? = null

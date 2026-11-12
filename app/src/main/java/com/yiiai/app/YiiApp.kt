@@ -15,6 +15,7 @@ class YiiApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        com.yiiai.app.phone.SelfForeground.register(this)
         settings = SettingsStore(this)
         live = LiveSession(this, settings)
     }

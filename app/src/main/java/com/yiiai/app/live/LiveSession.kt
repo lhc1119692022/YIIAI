@@ -6,7 +6,7 @@ import com.yiiai.app.audio.AudioRouting
 import com.yiiai.app.audio.MicStreamer
 import com.yiiai.app.audio.VoicePlayer
 import com.yiiai.app.settings.AppSettings
-import com.yiiai.app.settings.CameraFacing
+import com.yiiai.app.settings.QualityPresets
 import com.yiiai.app.settings.SettingsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -71,54 +71,100 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
     private val _log = MutableStateFlow<List<String>>(emptyList())
     val log: StateFlow<List<String>> = _log.asStateFlow()
 
-    private val cameraCapture = com.yiiai.app.phone.CameraFrameCapture(appContext)
+    private fun tagged(tag: Byte, bytes: ByteArray): ByteString {
+        val frame = ByteArray(bytes.size + 1)
+        frame[0] = tag
+        System.arraycopy(bytes, 0, frame, 1, bytes.size)
+        return frame.toByteString()
+    }
 
-    /** 工具执行器：截图 / 点击 / 输入 / 按需看摄像头，跑在独立协程里，不阻塞 actor。 */
+    /**
+     * 发一帧画面。返回 true 已发出、false 连接不在了、null 这一帧因为上行拥塞被跳过。
+     *
+     * 画面和语音共用一条连接、先进先出。一帧画面有几十到几百 KB，网络慢时会把语音堵在后面，
+     * 所以只有发送队列基本排空时才放下一帧进去：网速不够时自动降帧率，语音始终优先。
+     */
+    private fun sendVideo(tag: Byte, bytes: ByteArray): Boolean? {
+        val ws = liveSocket ?: return false
+        if (ws.queueSize() > VIDEO_QUEUE_GATE_BYTES) {
+            skippedVideoFrames.incrementAndGet()
+            return null
+        }
+        return ws.send(tagged(tag, bytes))
+    }
+
+    private val skippedVideoFrames = AtomicLong()
+
+    /**
+     * 摄像头画面流：模型调用 look_at_camera 后打开，连续发一段时间，到点自己关。
+     * 同时给首页提供一路预览，让用户看到镜头正在拍什么。
+     */
+    private val cameraStreamer = com.yiiai.app.phone.CameraStreamer(
+        context = appContext,
+        // tagged-v1：摄像头帧前缀 0x01。
+        sendFrame = { bytes -> sendVideo(LiveProtocol.TAG_CAMERA, bytes) },
+        onLog = { log(it) },
+        onChanged = { publishVision() },
+        onEnded = { expired, problem, frames -> inbox.trySend(Msg.CameraEnded(generation, expired, problem, frames)) },
+    )
+
+    /** 首页用的摄像头预览帧；镜头没开时为 null。 */
+    val cameraPreview: StateFlow<android.graphics.Bitmap?> get() = cameraStreamer.preview
+
+    /** 工具执行器：截图 / 点击 / 输入 / 看屏幕 / 看摄像头，跑在独立协程里，不阻塞 actor。 */
     private val toolRunner = com.yiiai.app.phone.PhoneToolRunner(
         context = appContext,
-        sendScreenFrame = { bytes ->
-            // tagged-v1：屏幕帧前缀 0x02，直接走实时连接。
-            val frame = ByteArray(bytes.size + 1)
-            frame[0] = LiveProtocol.TAG_SCREEN
-            System.arraycopy(bytes, 0, frame, 1, bytes.size)
-            liveSocket?.send(frame.toByteString()) ?: false
-        },
-        sendCameraFrame = { bytes ->
-            val frame = ByteArray(bytes.size + 1)
-            frame[0] = LiveProtocol.TAG_CAMERA
-            System.arraycopy(bytes, 0, frame, 1, bytes.size)
-            liveSocket?.send(frame.toByteString()) ?: false
-        },
-        sendEvent = { json ->
-            val ws = liveSocket
-            if (ws == null) false else ws.send(json)
-        },
-        startWatching = { seconds -> watchScreen(seconds) },
+        // tagged-v1：屏幕帧前缀 0x02，直接走实时连接。
+        sendScreenFrame = { bytes -> liveSocket?.send(tagged(LiveProtocol.TAG_SCREEN, bytes)) ?: false },
+        sendEvent = { json -> liveSocket?.send(json) ?: false },
+        watchScreen = { seconds -> watchScreen(seconds) },
+        stopScreen = { endWatching(WatchEnd.Model) },
         isWatching = { screenStreamer.running },
-        captureCamera = { facing, onFrame -> cameraCapture.capture(facing, onFrame = onFrame) },
+        screenQuality = { settings.current.screenVideo },
+        startCamera = { facing, seconds -> cameraStreamer.start(facing, settings.current.cameraVideo, seconds) },
+        stopCamera = { cameraStreamer.stop() },
         visionEnabled = { settings.current.visionEnabled },
         defaultCameraFacing = { settings.current.cameraFacing },
+        defaultCameraSeconds = { settings.current.cameraLookSeconds },
     )
 
     /**
      * 屏幕实时画面。模型主要靠它「看见」用户在做什么，控件树只用来精确点击。
-     * 由工具 look_at_screen / watch_screen 开启，闲置一段时间自动关闭。
+     * 由工具 look_at_screen / watch_screen 开启，到时间自动关闭。
      */
     internal val screenStreamer = com.yiiai.app.phone.ScreenStreamer(
         context = appContext,
         sendEvent = { json -> liveSocket?.send(json) ?: false },
-        sendFrame = { bytes ->
-            val frame = ByteArray(bytes.size + 1)
-            frame[0] = LiveProtocol.TAG_SCREEN
-            System.arraycopy(bytes, 0, frame, 1, bytes.size)
-            liveSocket?.send(frame.toByteString()) ?: false
-        },
+        sendFrame = { bytes -> sendVideo(LiveProtocol.TAG_SCREEN, bytes) },
         onLog = { log(it) },
     )
 
-    /** 屏幕画面闲置多久后自动关掉。 */
-    private var watchUntil = 0L
+    // ---- 看屏幕的计时。工具协程、界面线程和 actor 都会碰，统一用 watchLock 保护。
+    private val watchLock = Any()
+    /** 屏幕画面到什么时候自动关；0 表示没在看。 */
+    @Volatile private var watchUntil = 0L
+    /** 自动续期最多续到什么时候（从最近一次明确请求算起）。 */
+    private var watchAutoLimit = 0L
+
+    /** YIIAI 在前台时已经为它停表多久。 */
+    private var watchPausedMs = 0L
     private var watchTimer: kotlinx.coroutines.Job? = null
+
+    // ---- 安静提醒
+    /** 最近一次有人说话的时间。 */
+    @Volatile private var lastActivityAt = 0L
+    /** 用户沉默期间已经搭过几次话；用户一说话就清零。 */
+    private var nudges = 0
+    /** 这一次要安静多久才搭话（在陪伴模式的范围内随机取）；0 表示还没取。 */
+    private var nudgeAfterMs = 0L
+    private var nudgeMode = com.yiiai.app.settings.CompanionMode.Off
+    private var proactiveJob: kotlinx.coroutines.Job? = null
+    private val eventSeq = AtomicLong()
+
+    /** 已经完整播完的回复 run_id；服务端事后补的超时通知据此忽略。只留最近一批。 */
+    private val playedRuns = object : LinkedHashMap<String, Boolean>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>?) = size > MAX_MESSAGES
+    }
 
     /** 已执行过的 call_id，避免重复调用同一工具。只留最近一批，长通话也不会一直涨。 */
     private val handledCalls = LinkedHashSet<String>()
@@ -131,10 +177,10 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
     private val player = VoicePlayer(PlayerCallbacks())
 
     // ---- 以下字段只在 actor 协程中读写
-    private var generation = 0
+    @Volatile private var generation = 0
     private var socket: WebSocket? = null
     private var mic: MicStreamer? = null
-    private var step = SetupStep.None
+    @Volatile private var step = SetupStep.None
     private var call: AppSettings? = null
     private var closingNote: String? = null
     private var pendingAudio: AudioContext? = null
@@ -194,10 +240,28 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
         _log.value = emptyList()
     }
 
-    /** 界面用：手动开关屏幕画面。 */
-    fun setWatching(on: Boolean) {
-        if (on) watchScreen(300) else stopWatching()
+    /** 设置里改了视觉、画质或主动开口：通话中立即生效的部分在这里重新下发。 */
+    fun onSettingsChanged() = onVisionSettingsChanged()
+
+    /** 界面用：再看 [seconds] 秒屏幕（没在看就开始看）。 */
+    fun extendWatching(seconds: Int = com.yiiai.app.phone.PhoneToolRunner.LOOK_SECONDS): Boolean =
+        watchScreen(seconds, additive = true)
+
+    /** 界面用：用户手动停止看屏幕。 */
+    fun stopWatchingByUser() { endWatching(WatchEnd.User) }
+
+    /** 界面用：用户手动关掉摄像头。 */
+    fun stopCameraByUser() {
+        if (!cameraStreamer.stop()) return
+        liveSocket?.let { ws ->
+            ws.send(LiveProtocol.videoState("camera", false))
+            ws.send(LiveProtocol.videoStreamFocus(if (screenStreamer.running) "screen" else "auto"))
+        }
+        tellModel("用户手动关掉了摄像头，你现在看不到现实画面了。")
     }
+
+    /** 首页显示摄像头预览期间置为 true；没人看时不解码预览帧。 */
+    fun setCameraPreviewWanted(wanted: Boolean) { cameraStreamer.previewWanted = wanted }
 
     val isWatching: Boolean get() = screenStreamer.running
 
@@ -215,14 +279,28 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
             Msg.ToggleMute -> toggleMuteInternal()
             Msg.ToggleSpeaker -> toggleSpeakerInternal()
             Msg.VisionSettingsChanged -> {
-                if (!settings.current.visionEnabled) cameraCapture.stopActiveCapture()
-                if (step == SetupStep.Done) sendVisionInstructions()
+                if (!settings.current.visionEnabled && cameraStreamer.stop() && step == SetupStep.Done) {
+                    send(LiveProtocol.videoState("camera", false))
+                    send(LiveProtocol.videoStreamFocus(if (screenStreamer.running) "screen" else "auto"))
+                }
+                if (step == SetupStep.Done) {
+                    sendVisionInstructions()
+                    // 画质档位可能变了：重新声明画面规格。音频采样率通话中不能换，沿用接通时的。
+                    call?.let { send(LiveProtocol.mediaConfigure(it.outputSampleRate, videoEnvelope())) }
+                }
             }
+            is Msg.CameraEnded -> if (msg.gen == generation) onCameraEnded(msg.expired, msg.problem, msg.frames)
+            is Msg.ProactiveTick -> if (msg.gen == generation) onProactiveTick(msg.force)
+            is Msg.ProactiveRunPlayed -> if (msg.gen == generation) setServerPlayback(false)
             is Msg.Opened -> if (msg.gen == generation) onOpened()
             is Msg.Text -> if (msg.gen == generation) onText(msg.text)
             is Msg.Binary -> if (msg.gen == generation) onBinary(msg.bytes)
             is Msg.Closed -> if (msg.gen == generation) onClosed(msg.code, msg.reason)
-            is Msg.Failure -> if (msg.gen == generation) onSocketFailure(msg.message)
+            is Msg.Failure -> if (msg.gen == generation) {
+                // 握手被拒（401/403）：这把 Key 失效了，设置页据此提示重新连接。
+                if (msg.keyRejected) settings.markApiKeyRejected(true)
+                onSocketFailure(msg.message)
+            }
             is Msg.MicError -> if (msg.gen == generation) fail(msg.message)
             is Msg.Reconnect -> if (msg.gen == generation && socket == null && !userHangup) attemptReconnect()
             is Msg.ToolDone -> if (msg.gen == generation) send(msg.payload)
@@ -257,12 +335,14 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
         val gen = generation
         call = s
         step = SetupStep.Attach
+        serverPlayback = false
         closingNote = null
         pendingAudio = null
         lastRun = null
         userDraftId = null
         resuming = !freshSession && resumeSessionId != null
         if (freshSession) {
+            playedRuns.clear()
             userMsgByTurn.clear()
             aiMsgByRun.clear()
             droppedFrames.set(0)
@@ -396,6 +476,8 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
     private fun onAttached(ev: ServerEvent) {
         if (step != SetupStep.Attach) return
         val sid = ev.str("session_id")
+        // 能创建会话，说明 Key 是好的。
+        settings.markApiKeyRejected(false)
         _state.update { it.copy(sessionId = sid) }
         if (sid != null) resumeSessionId = sid
         // 恢复会话：音色/人设由服务端会话保存，不必重复下发；但媒体配置重连后必须重发。
@@ -427,6 +509,8 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
         val raw = ev.str("arguments").orEmpty()
         val gen = generation
         log("⚙ 工具 $name(${raw.take(120)})")
+        // 模型正在动手操作：事情没做完，屏幕画面不能在这时候到期。
+        if (name in Tools.actionTools) keepWatching(WATCH_KEEP_ON_ACTION_MS)
         scope.launch {
             val args = runCatching {
                 kotlinx.serialization.json.Json.parseToJsonElement(raw) as? kotlinx.serialization.json.JsonObject
@@ -460,6 +544,8 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
                 s.instructions,
                 visionEnabled = settings.current.visionEnabled,
                 cameraFacing = settings.current.cameraFacing,
+                cameraSeconds = settings.current.cameraLookSeconds,
+                companion = settings.current.companion != com.yiiai.app.settings.CompanionMode.Off,
             ),
         )
     }
@@ -473,8 +559,11 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
     private fun configureMedia() {
         val s = call ?: return
         step = SetupStep.Media
-        send(LiveProtocol.mediaConfigure(s.outputSampleRate))
+        send(LiveProtocol.mediaConfigure(s.outputSampleRate, videoEnvelope()))
     }
+
+    /** media.configure 里屏幕和摄像头共用一份画面声明，取两路档位的外包络。 */
+    private fun videoEnvelope() = QualityPresets.envelope(settings.current.screenVideo, settings.current.cameraVideo)
 
     private fun onMediaConfigured(ev: ServerEvent) {
         if (step != SetupStep.Media) return
@@ -526,33 +615,282 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
                 notice = if (recovered) "网络中断过一次，已接回原来的对话" else it.notice,
             )
         }
+        // 断线前正在看屏幕、时间还没到：接着看。
+        if (recovered) resumeWatchingIfNeeded()
+        startProactiveLoop(gen)
+    }
+
+    // ---------------------------------------------------------------- 看屏幕
+
+    /**
+     * 开启或续期屏幕画面，[seconds] 秒后自动关闭。只会延长，不会把剩余时间改短。
+     * 返回是否真的在推流（无障碍没连上时为 false）。
+     */
+    internal fun watchScreen(seconds: Int, additive: Boolean = false): Boolean = synchronized(watchLock) {
+        if (step != SetupStep.Done) return false
+        val now = System.currentTimeMillis()
+        if (!screenStreamer.running) screenStreamer.start(scope) { settings.current.screenVideo }
+        if (!screenStreamer.running) {
+            watchUntil = 0L
+            publishVision()
+            return false
+        }
+        watchUntil = if (additive) {
+            // 界面上的「再看 3 分钟」：在剩余时间上往后加，但总共不超过一次观看的上限。
+            (maxOf(watchUntil, now) + seconds * 1000L)
+                .coerceAtMost(now + com.yiiai.app.phone.PhoneToolRunner.WATCH_MAX_SECONDS * 1000L)
+        } else {
+            maxOf(watchUntil, now + seconds * 1000L)
+        }
+        watchAutoLimit = watchUntil + WATCH_AUTO_EXTEND_MAX_MS
+        watchPausedMs = 0L
+        if (watchTimer?.isActive != true) watchTimer = scope.launch { watchLoop() }
+        publishVision()
+        true
     }
 
     /**
-     * 开启/续期屏幕画面。[seconds] 秒内没有新的请求就自动关闭，避免一直推流。
+     * 模型正在操作手机：保证屏幕画面至少还剩 [ms]，让它看得到这一步操作的结果。
+     * 这不是「操作完再多等一段」——剩余时间本来就够的话什么都不变，只在快到期时补到 [ms]。
+     * 自动续期有总上限，超过后必须由模型或用户明确续期，避免忘了关一直推流。
      */
-    internal fun watchScreen(seconds: Int = 120) {
-        if (step != SetupStep.Done) return
-        watchUntil = System.currentTimeMillis() + seconds * 1000L
-        if (!screenStreamer.running) {
-            screenStreamer.start(scope)
+    private fun keepWatching(ms: Long) = synchronized(watchLock) {
+        if (watchUntil == 0L || !screenStreamer.running) return
+        val target = minOf(System.currentTimeMillis() + ms, watchAutoLimit)
+        if (target > watchUntil) {
+            watchUntil = target
+            publishVision()
         }
-        watchTimer?.cancel()
-        watchTimer = scope.launch {
-            while (System.currentTimeMillis() < watchUntil) {
-                kotlinx.coroutines.delay(1000)
+    }
+
+    /** 每秒检查一次：停表、到期关闭、画面流意外中断。 */
+    private suspend fun watchLoop() {
+        var last = System.currentTimeMillis()
+        while (true) {
+            delay(1000)
+            var end: WatchEnd? = null
+            synchronized(watchLock) {
+                val now = System.currentTimeMillis()
+                val dt = now - last
+                last = now
+                if (watchUntil == 0L) return
+                when {
+                    !screenStreamer.running -> end = WatchEnd.Broken
+                    // YIIAI 自己在前台时没有画面可发，先停表；停太久就照常计时，避免无限期挂着。
+                    screenStreamer.paused && watchPausedMs < WATCH_PAUSE_BUDGET_MS -> {
+                        watchUntil += dt
+                        watchAutoLimit += dt
+                        watchPausedMs += dt
+                    }
+                    now >= watchUntil -> end = WatchEnd.Expired
+                }
             }
-            if (screenStreamer.running) {
-                screenStreamer.stop("屏幕画面临时关闭（${seconds} 秒没有新的请求）")
+            publishVision()
+            // 刚好在这一瞬间被续期的话 endWatching 会放弃关闭，继续计时。
+            end?.let { if (endWatching(it)) return }
+        }
+    }
+
+    /** 结束看屏幕并把原因告诉模型和用户。返回之前是否在看。 */
+    private fun endWatching(why: WatchEnd): Boolean {
+        val was = synchronized(watchLock) {
+            val running = watchUntil != 0L || screenStreamer.running
+            when (why) {
+                // 这两种由计时循环自己发起：先确认条件还成立（可能刚被续期或重新开启）。
+                WatchEnd.Expired -> if (System.currentTimeMillis() < watchUntil) return false
+                WatchEnd.Broken -> if (screenStreamer.running) return false
+                else -> watchTimer?.cancel()
+            }
+            watchUntil = 0L
+            watchTimer = null
+            screenStreamer.stop()
+            running
+        }
+        publishVision()
+        if (!was) return false
+        log("屏幕画面已关闭（${why.label}，发送 ${screenStreamer.framesSent} 帧，画面没变省掉 ${screenStreamer.framesSkipped} 帧）")
+        when (why) {
+            // 到时间自然结束：用户不需要知道，只让模型知道自己看不到了，免得它拿旧画面回答。
+            WatchEnd.Expired ->
+                tellModel("屏幕画面已经到时间自动关闭，你现在看不到屏幕了。之后需要看屏幕时，重新调用 look_at_screen。")
+            WatchEnd.Broken -> {
+                tellModel("屏幕画面中断了：无障碍服务被系统关闭，你现在看不到屏幕，也点不了。请告诉用户到设置里重新打开「屏幕与应用控制」。")
+                _state.update { it.copy(notice = "屏幕画面中断：无障碍服务被系统关掉了") }
+            }
+            WatchEnd.User -> tellModel("用户手动关掉了屏幕画面，你现在看不到屏幕了。")
+            WatchEnd.Model, WatchEnd.Silent -> Unit
+        }
+        return true
+    }
+
+    /** 断线时：停掉推流但记住还剩多久，重连后接着看。 */
+    private fun suspendWatching() = synchronized(watchLock) {
+        watchTimer?.cancel()
+        watchTimer = null
+        screenStreamer.stop()
+        publishVision()
+    }
+
+    private fun resumeWatchingIfNeeded() {
+        val remaining = synchronized(watchLock) {
+            val left = watchUntil - System.currentTimeMillis()
+            watchUntil = 0L
+            left
+        }
+        if (remaining > 5_000L && watchScreen((remaining / 1000L).toInt())) {
+            log("重连后继续看屏幕，还剩 ${remaining / 1000} 秒")
+        }
+    }
+
+    /** 把屏幕 / 摄像头的观看状态同步到界面。 */
+    private fun publishVision() {
+        val watching = screenStreamer.running
+        _state.update {
+            it.copy(
+                watchingScreen = watching,
+                watchEndsAt = if (watching) watchUntil else 0L,
+                watchPaused = watching && screenStreamer.paused,
+                cameraActive = cameraStreamer.running,
+                cameraEndsAt = cameraStreamer.endsAt,
+                cameraFacing = cameraStreamer.facing?.label.orEmpty(),
+            )
+        }
+    }
+
+    /**
+     * 静默告诉模型一条事实（画面关了、镜头关了）。模型不会因此开口，
+     * 但之后不会再假装自己还能看到。任何线程都可以调用。
+     */
+    private fun tellModel(text: String) {
+        val ws = liveSocket ?: return
+        log("→ session.thinking.append $text")
+        ws.send(LiveProtocol.thinkingAppend(text, nextEventId()))
+    }
+
+    private fun nextEventId() = EVENT_ID_PREFIX + eventSeq.incrementAndGet()
+
+    private fun onCameraEnded(expired: Boolean, problem: String?, frames: Int) {
+        send(LiveProtocol.videoState("camera", false))
+        // 摄像头只是临时看一段，结束后把主画面还回去，否则之后的屏幕帧服务端不看。
+        send(LiveProtocol.videoStreamFocus(if (screenStreamer.running) "screen" else "auto"))
+        if (problem != null) {
+            tellModel("摄像头画面中断：$problem。镜头已经关闭，你现在看不到现实画面了。")
+            _state.update { it.copy(notice = "摄像头中断：$problem") }
+        } else if (expired) {
+            tellModel("摄像头已经到时间自动关闭（共发送 $frames 帧），你现在看不到现实画面了。还需要看就再调用 look_at_camera。")
+        }
+    }
+
+    // ---------------------------------------------------------------- 陪伴模式
+
+    private fun startProactiveLoop(gen: Int) {
+        proactiveJob?.cancel()
+        lastActivityAt = System.currentTimeMillis()
+        nudges = 0
+        nudgeAfterMs = 0L
+        proactiveJob = scope.launch {
+            while (true) {
+                delay(PROACTIVE_TICK_MS)
+                inbox.send(Msg.ProactiveTick(gen))
             }
         }
     }
 
-    internal fun stopWatching() {
-        watchTimer?.cancel()
-        watchTimer = null
-        screenStreamer.stop()
+    /**
+     * 陪伴模式：用户安静够久了，就让角色主动搭一次话。
+     * 「够久」每次都在档位的范围里随机取（标准陪伴 30 秒–2 分钟，热情陪伴 10–45 秒）。
+     * 连续几次没人回应后间隔逐次加倍，免得对着没人的房间一直说；用户一开口就恢复。
+     */
+    private fun onProactiveTick(force: Boolean = false) {
+        val mode = settings.current.companion
+        if (step != SetupStep.Done) return
+        if (mode == com.yiiai.app.settings.CompanionMode.Off && !force) return
+        val now = System.currentTimeMillis()
+        val state = _state.value
+        if (state.assistantSpeaking) {
+            lastActivityAt = now
+            return
+        }
+        if (!force) {
+            if (state.muted || state.userSpeaking) return
+            if (nudgeAfterMs == 0L || nudgeMode != mode) {
+                nudgeMode = mode
+                nudgeAfterMs = pickNudgeDelay(mode)
+            }
+            if (now - lastActivityAt < nudgeAfterMs) return
+        }
+        val quiet = now - lastActivityAt
+        val warm = mode == com.yiiai.app.settings.CompanionMode.Warm
+        nudges++
+        lastActivityAt = now
+        nudgeAfterMs = pickNudgeDelay(mode)
+        val span = if (quiet >= 60_000L) "${quiet / 60_000L} 分钟" else "${(quiet / 1000L).coerceAtLeast(1)} 秒"
+        log(
+            "💬 已安静 $span，让角色搭话（第 $nudges 次" +
+                (if (mode == com.yiiai.app.settings.CompanionMode.Off) "" else "，下次约 ${nudgeAfterMs / 1000} 秒后") + "）",
+        )
+        val prompt = buildString {
+            append("【陪伴提示，不要念出来，也不要提到它】用户已经有 $span 没说话了。")
+            append("请用你自己的人设和说话方式，自然地找个话头跟用户搭话：")
+            append("可以接着刚才聊的事往下说，可以说说你这会儿想到的，也可以关心一下对方在忙什么。")
+            append(
+                if (warm) {
+                    "语气热络、主动一些，像是忍不住想找对方说话。"
+                } else {
+                    "语气轻松随意，点到为止。"
+                },
+            )
+            append("一两句就好，说完等对方回应。是搭话，不是催对方开口：不要问「你怎么不说话」「还在吗」。")
+            if (state.watchingScreen) append("你现在能看到用户的屏幕，也可以就屏幕上的内容说两句。")
+            if (nudges > 1) append("你上一次搭话对方没有回应，这次换个话题，不要重复。")
+        }
+        // 主动开口的回复不带 turn_id / chunk_id，没法逐块回执；先切到服务端计时，说完再切回来。
+        setServerPlayback(true)
+        send(LiveProtocol.commentaryAppend(prompt, nextEventId()))
     }
+
+    /** 当前是否处于「服务端按实时速度推进播放」的模式。 */
+    private var serverPlayback = false
+
+    private fun setServerPlayback(on: Boolean) {
+        if (serverPlayback == on || step != SetupStep.Done) return
+        val s = call ?: return
+        serverPlayback = on
+        send(LiveProtocol.mediaConfigure(s.outputSampleRate, videoEnvelope(), serverPlayback = on))
+    }
+
+    private fun pickNudgeDelay(mode: com.yiiai.app.settings.CompanionMode): Long {
+        if (mode == com.yiiai.app.settings.CompanionMode.Off) return Long.MAX_VALUE / 4
+        val base = kotlin.random.Random.nextLong(mode.minSeconds * 1000L, mode.maxSeconds * 1000L + 1)
+        val unanswered = (nudges - NUDGES_BEFORE_BACKOFF + 1).coerceIn(0, 6)
+        return (base shl unanswered).coerceAtMost(maxOf(NUDGE_BACKOFF_MAX_MS, base))
+    }
+
+    /** 用户确实说了话：安静计时从头算，搭话的间隔也恢复正常。 */
+    private fun onUserSpoke() {
+        lastActivityAt = System.currentTimeMillis()
+        if (nudges != 0) {
+            nudges = 0
+            nudgeAfterMs = 0L
+        }
+    }
+
+    // ---------------------------------------------------------------- 调试入口（仅 debug 构建调用）
+
+    /** 直接执行一个工具，和模型调用走同一条路径，结果只写日志。 */
+    internal fun debugRunTool(name: String, argsJson: String) {
+        scope.launch {
+            val args = runCatching {
+                kotlinx.serialization.json.Json.parseToJsonElement(argsJson) as? kotlinx.serialization.json.JsonObject
+            }.getOrNull() ?: kotlinx.serialization.json.JsonObject(emptyMap())
+            if (name in Tools.actionTools) keepWatching(WATCH_KEEP_ON_ACTION_MS)
+            val result = runCatching { toolRunner.run(name, args) }.getOrElse { "工具执行出错：${it.message}" }
+            log("🧪 $name($argsJson) → $result")
+        }
+    }
+
+    /** 立刻触发一次陪伴搭话，不等安静时间。 */
+    internal fun debugNudge() { inbox.trySend(Msg.ProactiveTick(generation, force = true)) }
 
     // ---------------------------------------------------------------- 音频
 
@@ -582,12 +920,24 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
 
     private fun stopPlayback(run: String, turn: String) {
         val playedMs = player.stopRun(run) ?: return
+        if (turn.isEmpty()) {
+            setServerPlayback(false)
+            return
+        }
         send(LiveProtocol.playbackStopped(run, turn, playedMs))
     }
 
     private fun onInterrupted(ev: ServerEvent) {
         val run = ev.str("run_id")
         val text = ev.str("text")
+        // playback_timeout 是服务端自己按回执估算的播放超时：用户真插话时 reason 是 barge-in，
+        // 所以这种一律不是「被打断」。我们已经完整播完的、或正在播的，都不该被它掐掉
+        // （角色主动开口的回复没有 turn_id / chunk_id，服务端等不到逐块回执，必然误判）。
+        if (run != null && text.isNullOrBlank() && ev.str("reason") == "playback_timeout") {
+            val finished = playedRuns.containsKey(run)
+            log("（忽略服务端的播放超时：这段${if (finished) "已经播完" else "由本地播放控制"}）")
+            return
+        }
         if (run == null) {
             player.openRuns().forEach { (r, t) -> stopPlayback(r, t) }
             return
@@ -596,6 +946,7 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
             updateMessage(id) { m ->
                 m.copy(text = text?.takeIf { it.isNotBlank() } ?: m.text, final = true, interrupted = true)
             }
+            _messages.value.firstOrNull { it.id == id }?.let { log("🗣（被打断）${it.text.take(200)}") }
         }
         stopPlayback(run, ev.str("turn_id").orEmpty())
     }
@@ -606,6 +957,8 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
         val status = ev.str("status")
         val msg = _messages.value.firstOrNull { it.id == id } ?: return
         if (status != "completed" && msg.text.isBlank()) removeMessage(id) else updateMessage(id) { it.copy(final = true) }
+        // 角色主动开口的回复没有 turn_id；把它说了什么记进日志，方便核对陪伴模式的效果。
+        if (ev.str("turn_id").isNullOrEmpty() && msg.text.isNotBlank()) log("🗣（主动）${msg.text.take(200)}")
     }
 
     // ---------------------------------------------------------------- 字幕
@@ -618,6 +971,9 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
             addMessage(ChatMessage(id, Role.User, text, final = final))
         } else {
             updateMessage(id) { it.copy(text = text, final = final) }
+        }
+        if (text.isNotBlank()) {
+            if (final) onUserSpoke() else lastActivityAt = System.currentTimeMillis()
         }
         if (final) {
             userDraftId = null
@@ -676,6 +1032,11 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
         val err = ev.obj("error")
         val code = err?.str("code") ?: "unknown"
         val message = err?.str("message").orEmpty()
+        // 我们自己发的静默通知 / 安静提醒被拒：只记日志，不打扰用户。
+        if (err?.str("client_event_id")?.startsWith(EVENT_ID_PREFIX) == true) {
+            log("⚠ 服务端没有接受通知：$code $message")
+            return
+        }
         if (step != SetupStep.Done) {
             fail("服务端拒绝：$code $message".trim())
         } else {
@@ -716,8 +1077,9 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
 
     /** 只释放本次连接的资源，保留会话 ID、字幕与音频路由。 */
     private fun releaseConnection() {
-        stopWatching()
-        cameraCapture.stopActiveCapture()
+        suspendWatching()
+        cameraStreamer.stop()
+        proactiveJob?.cancel()
         generation++
         liveSocket = null
         mic?.stop()
@@ -745,8 +1107,10 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
     }
 
     private fun teardown() {
-        stopWatching()
-        cameraCapture.stopActiveCapture()
+        endWatching(WatchEnd.Silent)
+        cameraStreamer.stop()
+        proactiveJob?.cancel()
+        proactiveJob = null
         generation++
         liveSocket = null
         mic?.stop()
@@ -762,6 +1126,8 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
         resuming = false
         val dropped = droppedFrames.getAndSet(0)
         if (dropped > 0) log("网络拥塞丢弃了 $dropped 帧上行音频（约 ${dropped * 20} ms）")
+        val skipped = skippedVideoFrames.getAndSet(0)
+        if (skipped > 0) log("上行忙时跳过了 $skipped 帧画面（语音优先）")
         _messages.update { list -> list.map { if (it.final) it else it.copy(final = true) } }
         _levels.value = AudioLevels()
         _state.update { it.copy(userSpeaking = false, assistantSpeaking = false, muted = false) }
@@ -771,7 +1137,13 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
         val ws = socket ?: return
         val action = ServerEventPeek.action(text)
         log("→ $action")
+        raw("→", text)
         ws.send(text)
+    }
+
+    /** 仅 debug 构建：把收发的原始 JSON 打到 logcat（标签 YIIAI.Raw），排查协议问题用。不进应用内日志。 */
+    private fun raw(direction: String, json: String) {
+        if (com.yiiai.app.BuildConfig.DEBUG) Log.v("YIIAI.Raw", "$direction ${json.take(700)}")
     }
 
     private fun log(line: String) {
@@ -815,6 +1187,7 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            raw("←", text)
             inbox.trySend(Msg.Text(gen, text))
         }
 
@@ -832,22 +1205,31 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            inbox.trySend(Msg.Failure(gen, describeFailure(t, response)))
+            val rejected = response?.code == 401 || response?.code == 403
+            inbox.trySend(Msg.Failure(gen, describeFailure(t, response), keyRejected = rejected))
         }
     }
 
     private inner class PlayerCallbacks : VoicePlayer.Listener {
         override fun onChunkPlayed(runId: String, turnId: String, chunkId: String) {
+            // 没有编号的片段（角色主动开口）回执会被服务端拒绝，不发。
+            if (chunkId.isEmpty() || turnId.isEmpty()) return
             log("→ playback.chunk.completed $chunkId")
-            liveSocket?.send(LiveProtocol.chunkCompleted(runId, turnId, chunkId))
+            liveSocket?.send(LiveProtocol.chunkCompleted(runId, turnId, chunkId).also { raw("→", it) })
         }
 
         override fun onRunPlayed(runId: String, turnId: String) {
             log("→ playback.completed ${runId.takeLast(8)}｜下行 ${audioFrames} 帧/${audioBytes / 1024}KB｜${player.stats()}")
-            liveSocket?.send(LiveProtocol.playbackCompleted(runId, turnId))
+            playedRuns[runId] = true
+            if (turnId.isEmpty()) {
+                inbox.trySend(Msg.ProactiveRunPlayed(generation))
+                return
+            }
+            liveSocket?.send(LiveProtocol.playbackCompleted(runId, turnId).also { raw("→", it) })
         }
 
         override fun onPlayingChanged(playing: Boolean) {
+            lastActivityAt = System.currentTimeMillis()
             _state.update { it.copy(assistantSpeaking = playing) }
         }
 
@@ -863,13 +1245,34 @@ class LiveSession(context: Context, private val settings: SettingsStore) {
         const val MAX_RECONNECT = 5
         const val BASE_RECONNECT_DELAY_MS = 500L
         const val MAX_RECONNECT_DELAY_MS = 8_000L
-        /** 上行积压超过约 8 秒音频就丢帧，避免 OkHttp 16 MB 上限触发断线。 */
-        const val MAX_SEND_QUEUE_BYTES = 256L * 1024
+        /**
+         * 上行积压超过这么多就丢语音帧，避免 OkHttp 16 MB 上限触发断线。
+         * 队列里可能排着一帧画面（清晰档摄像头一帧可达三四百 KB），所以阈值要比一帧画面大。
+         */
+        const val MAX_SEND_QUEUE_BYTES = 1024L * 1024
         const val MAX_LOG_LINES = 400
         /** 会话内保留的消息条数上限。 */
         const val MAX_MESSAGES = 200
         /** 记住多少个已执行的工具调用（去重用）。 */
         const val MAX_HANDLED_CALLS = 64
+
+        /** 模型每操作一步，屏幕画面至少还剩这么久，够它看到结果并决定下一步。 */
+        const val WATCH_KEEP_ON_ACTION_MS = 30_000L
+        /** 自动续期最多比明确要求的时间多看这么久，之后必须明确续期。 */
+        const val WATCH_AUTO_EXTEND_MAX_MS = 10 * 60_000L
+        /** YIIAI 在前台时最多为它停表这么久。 */
+        const val WATCH_PAUSE_BUDGET_MS = 3 * 60_000L
+
+        const val PROACTIVE_TICK_MS = 2_000L
+        /** 连续搭话这么多次都没人回应后，间隔开始逐次加倍。 */
+        const val NUDGES_BEFORE_BACKOFF = 3
+        const val NUDGE_BACKOFF_MAX_MS = 30 * 60_000L
+
+        /** 发送队列超过这么多字节就不再放画面进去，让语音先走。 */
+        const val VIDEO_QUEUE_GATE_BYTES = 32L * 1024
+
+        /** 我们自己发的 append 事件 ID 前缀，用来认出对应的错误回执。 */
+        const val EVENT_ID_PREFIX = "yii-"
         val QUIET_EVENTS = setOf(
             "input.transcript.updated",
             "output.transcript.updated",
@@ -891,6 +1294,16 @@ private enum class SetupStep(val label: String) {
     Done("就绪"),
 }
 
+/** 屏幕画面为什么关。 */
+private enum class WatchEnd(val label: String) {
+    Expired("到时间"),
+    Broken("无障碍中断"),
+    User("用户关闭"),
+    Model("模型关闭"),
+    /** 通话结束时顺手关掉，不用通知谁。 */
+    Silent("通话结束"),
+}
+
 private class AudioContext(val runId: String, val turnId: String, val chunkId: String?)
 
 private sealed interface Msg {
@@ -903,7 +1316,10 @@ private sealed interface Msg {
     class Text(val gen: Int, val text: String) : Msg
     class Binary(val gen: Int, val bytes: ByteArray) : Msg
     class Closed(val gen: Int, val code: Int, val reason: String) : Msg
-    class Failure(val gen: Int, val message: String) : Msg
+    class Failure(val gen: Int, val message: String, val keyRejected: Boolean = false) : Msg
+    class CameraEnded(val gen: Int, val expired: Boolean, val problem: String?, val frames: Int) : Msg
+    class ProactiveTick(val gen: Int, val force: Boolean = false) : Msg
+    class ProactiveRunPlayed(val gen: Int) : Msg
     class MicError(val gen: Int, val message: String) : Msg
     class Reconnect(val gen: Int) : Msg
     class ToolDone(val gen: Int, val payload: String) : Msg

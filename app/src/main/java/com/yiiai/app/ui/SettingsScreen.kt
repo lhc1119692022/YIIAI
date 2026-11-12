@@ -79,7 +79,7 @@ import com.yiiai.app.settings.VoiceOption
 import com.yiiai.app.ui.theme.LocalYiiPalette
 import com.yiiai.app.ui.theme.ThemeMode
 
-private enum class SettingsPage { Root, ApiKey, Voice, Persona, Memory, Appearance, Audio, PhoneUse, Storage, Log, About }
+private enum class SettingsPage { Root, ApiKey, Voice, Persona, Memory, Appearance, Audio, Quality, PhoneUse, Storage, Log, About }
 
 /** 仅 debug 用：把启动参数里的页面名映射成枚举。 */
 fun settingsPageFromKey(key: String?): String? = when (key) {
@@ -89,6 +89,7 @@ fun settingsPageFromKey(key: String?): String? = when (key) {
     "memory" -> "Memory"
     "appearance" -> "Appearance"
     "audio" -> "Audio"
+    "quality" -> "Quality"
     "phone_use" -> "PhoneUse"
     "storage" -> "Storage"
     "log" -> "Log"
@@ -146,6 +147,7 @@ fun SettingsScreen(
             SettingsPage.Memory -> MemoryPage(store)
             SettingsPage.Appearance -> AppearancePage(store)
             SettingsPage.Audio -> AudioPage(store)
+            SettingsPage.Quality -> QualityPage(store, live)
             SettingsPage.PhoneUse -> PhoneUsePage()
             SettingsPage.Storage -> StoragePage(store, live)
             SettingsPage.Log -> LogPage(logLines)
@@ -162,6 +164,7 @@ private fun pageTitle(page: SettingsPage) = when (page) {
     SettingsPage.Memory -> "长期记忆"
     SettingsPage.Appearance -> "外观"
     SettingsPage.Audio -> "通话音频"
+    SettingsPage.Quality -> "画质与音质"
     SettingsPage.PhoneUse -> "屏幕与应用控制"
     SettingsPage.Storage -> "存储与清理"
     SettingsPage.Log -> "日志"
@@ -199,19 +202,20 @@ private fun RootPage(
             SurfaceCard {
                 RootRow(
                     title = "API Key",
+                    // Key 只有连接成功才会保存，所以只有两种正常状态：已连接 / 未连接。
+                    // 第三种是保存之后被服务端拒绝了（过期、被删），需要重新连接。
                     summary = when {
-                        settings.apiKey.isBlank() -> "未填写"
-                        settings.apiKeyVerified -> "已连接"
-                        else -> "已设置，未验证"
+                        settings.apiKey.isBlank() -> "未连接"
+                        settings.apiKeyRejected -> "已失效，请重新连接"
+                        else -> "已连接"
                     },
                     tone = when {
-                        settings.apiKey.isBlank() -> RowTone.Danger
-                        settings.apiKeyVerified -> RowTone.Success
-                        else -> RowTone.Warning
+                        settings.apiKey.isBlank() || settings.apiKeyRejected -> RowTone.Danger
+                        else -> RowTone.Success
                     },
                     onClick = { onOpen(SettingsPage.ApiKey) },
                     trailing = {
-                        if (settings.apiKey.isNotBlank() && settings.apiKeyVerified) {
+                        if (settings.apiKey.isNotBlank() && !settings.apiKeyRejected) {
                             StatusDot(palette.positive)
                         }
                     },
@@ -227,6 +231,13 @@ private fun RootPage(
                     title = "通话音频",
                     summary = if (settings.speakerOn) "外放" else "听筒",
                     onClick = { onOpen(SettingsPage.Audio) },
+                )
+                RowDivider()
+                RootRow(
+                    title = "画质与音质",
+                    summary = listOf(settings.audioQuality, settings.screenQuality, settings.cameraQuality)
+                        .let { levels -> if (levels.distinct().size == 1) levels.first().label else "自定义" },
+                    onClick = { onOpen(SettingsPage.Quality) },
                 )
             }
         }
@@ -251,6 +262,16 @@ private fun RootPage(
                     onToggle = { store.update { s -> s.copy(sharedMemory = it) } },
                 )
                 RowDivider()
+                SegmentedChoice(
+                    title = "陪伴",
+                    options = com.yiiai.app.settings.CompanionMode.entries.map { it to it.label },
+                    selected = settings.companion,
+                    onSelect = { mode ->
+                        store.update { s -> s.copy(companion = mode) }
+                        live?.onSettingsChanged()
+                    },
+                )
+                RowDivider()
                 // 外观：内联三选一
                 InlineThemeRow(
                     current = theme,
@@ -266,7 +287,7 @@ private fun RootPage(
             SurfaceCard {
                 InlineSwitchRow(
                     title = "开启视觉",
-                    detail = "模型按需调用摄像头看几帧，完成后立即关闭；不会持续采集。",
+                    detail = "你让角色看现实中的东西时，它会短暂打开摄像头，之后自动关闭。",
                     checked = settings.visionEnabled,
                     onToggle = { enabled ->
                         if (!enabled) {
@@ -306,6 +327,12 @@ private fun RootPage(
                     title = "日志",
                     summary = "协议事件，排查用",
                     onClick = { onOpen(SettingsPage.Log) },
+                )
+                RowDivider()
+                RootRow(
+                    title = "使用情况访问",
+                    summary = if (com.yiiai.app.phone.ForegroundApp.hasUsageAccess(context)) "已允许" else "未允许",
+                    onClick = { com.yiiai.app.phone.ForegroundApp.openUsageAccessSettings(context) },
                 )
                 RowDivider()
                 // 屏幕与应用控制：组内最后一项，内联滑块 + 说明
@@ -567,20 +594,20 @@ private fun FieldPage(content: @Composable ColumnScope.() -> Unit) {
 @Composable
 private fun ApiKeyPage(store: SettingsStore) {
     val palette = LocalYiiPalette.current
+    val settings by store.state.collectAsStateWithLifecycleCompat()
     var key by rememberSaveable { mutableStateOf(store.current.apiKey) }
     var visible by rememberSaveable { mutableStateOf(false) }
     var checking by remember { mutableStateOf(false) }
-    // null = 还没验证过；true/false = 上次验证结果
-    var status by remember { mutableStateOf<Boolean?>(null) }
-    var message by remember { mutableStateOf<String?>(null) }
+    // 这次尝试失败的原因；null 表示没有失败。
+    var failure by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val saved = store.current.apiKey
-    val configured = saved.isNotBlank()
+    val saved = settings.apiKey
     val dirty = key.trim() != saved
+    // 只有两种结果：连接成功（才会保存），或者没有连接成功（不保存，告诉用户该查什么）。
+    val connected = saved.isNotBlank() && !settings.apiKeyRejected && !dirty && failure == null
 
     FieldPage {
-        // 顶部状态：一颗彩色圆点 + 文字，比一行灰字清楚。
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier
@@ -589,9 +616,7 @@ private fun ApiKeyPage(store: SettingsStore) {
                     .background(
                         when {
                             checking -> palette.textDim
-                            status == true -> palette.positive
-                            status == false -> palette.danger
-                            configured -> palette.positive
+                            connected -> palette.positive
                             else -> palette.danger
                         },
                     ),
@@ -599,16 +624,15 @@ private fun ApiKeyPage(store: SettingsStore) {
             Spacer(Modifier.width(8.dp))
             Text(
                 when {
-                    checking -> "正在验证连接…"
-                    status == true -> "已连接"
-                    status == false -> "连接失败"
-                    configured -> "已设置（未验证）"
+                    checking -> "正在连接…"
+                    connected -> "已连接"
+                    failure != null -> "没有连接成功"
+                    saved.isNotBlank() && settings.apiKeyRejected && !dirty -> "这个 Key 已失效"
                     else -> "未连接"
                 },
                 color = when {
                     checking -> palette.textDim
-                    status == true || (status == null && configured) -> palette.positive
-                    status == false -> palette.danger
+                    connected -> palette.positive
                     else -> palette.danger
                 },
                 fontSize = 14.sp,
@@ -620,8 +644,7 @@ private fun ApiKeyPage(store: SettingsStore) {
             value = key,
             onValueChange = {
                 key = it
-                status = null
-                message = null
+                failure = null
             },
             label = { Text("API Key") },
             singleLine = true,
@@ -630,41 +653,41 @@ private fun ApiKeyPage(store: SettingsStore) {
             modifier = Modifier.fillMaxWidth(),
         )
 
-        // 「连接」：验证通过才写入设置，失败不保存。
+        // 「连接」：连接成功才写入设置，失败不保存。
         PrimaryAction(
             when {
                 checking -> "正在连接…"
-                status == true && !dirty -> "已连接"
+                connected -> "已连接"
                 else -> "连接"
             },
         ) {
-            if (checking) return@PrimaryAction
+            if (checking || connected) return@PrimaryAction
             scope.launch {
                 checking = true
-                message = null
+                failure = null
                 when (val r = com.yiiai.app.settings.ApiKeyCheck.verify(key)) {
-                    is com.yiiai.app.settings.ApiKeyCheck.Result.Ok -> {
-                        store.update { it.copy(apiKey = key.trim()) }
-                        status = true
-                        message = "连接成功，已自动保存"
-                    }
-                    is com.yiiai.app.settings.ApiKeyCheck.Result.Invalid -> {
-                        status = false
-                        message = r.message
-                    }
-                    is com.yiiai.app.settings.ApiKeyCheck.Result.Network -> {
-                        status = null
-                        message = "连不上服务器：${r.message}。可以检查网络后重试。"
-                    }
+                    is com.yiiai.app.settings.ApiKeyCheck.Result.Ok -> store.saveVerifiedApiKey(key)
+                    is com.yiiai.app.settings.ApiKeyCheck.Result.Invalid ->
+                        failure = "${r.message}。请检查 Key 有没有复制完整、是否已被删除。"
+                    is com.yiiai.app.settings.ApiKeyCheck.Result.Network ->
+                        failure = "连不上服务器（${r.message}）。请检查网络后重试。"
                 }
                 checking = false
             }
         }
 
-        message?.let {
+        val hint = when {
+            failure != null -> failure
+            connected -> "连接成功，Key 已保存。"
+            saved.isNotBlank() && settings.apiKeyRejected && !dirty ->
+                "上次通话时服务端拒绝了这个 Key，可能已过期或被删除。请换一个新的 Key 再连接。"
+            saved.isNotBlank() && dirty -> "新的 Key 连接成功后才会替换现在保存的那个。"
+            else -> null
+        }
+        hint?.let {
             Text(
                 it,
-                color = if (status == false) palette.danger else palette.textDim,
+                color = if (connected || (failure == null && dirty)) palette.textDim else palette.danger,
                 fontSize = 12.sp,
                 lineHeight = 18.sp,
             )
@@ -682,7 +705,6 @@ private fun ApiKeyPage(store: SettingsStore) {
         )
     }
 }
-
 @Composable
 private fun VoicePage(store: SettingsStore) {
     val palette = LocalYiiPalette.current
@@ -768,14 +790,36 @@ private fun VoicePage(store: SettingsStore) {
     if (showAdd) {
         var id by rememberSaveable { mutableStateOf("") }
         var checking by remember { mutableStateOf(false) }
-        var found by remember { mutableStateOf<String?>(null) }
         var problem by remember { mutableStateOf<String?>(null) }
-        val scope = androidx.compose.runtime.rememberCoroutineScope()
+        val scope = rememberCoroutineScope()
         fun close() { showAdd = false }
-        fun add(label: String) {
-            store.addCustomVoice(label, id)
-            store.update { it.copy(voiceId = id.trim()) }
-            close()
+        // 一步完成：ID 查得到就直接添加并选中，查不到就报错，不再让用户确认第二次。
+        fun submit() {
+            val clean = id.trim()
+            if (clean.isEmpty() || checking) return
+            settings.allVoices().firstOrNull { it.id == clean }?.let { existing ->
+                store.update { it.copy(voiceId = existing.id) }
+                Toast.makeText(context, "「${existing.label}」已经在列表里，已选中", Toast.LENGTH_SHORT).show()
+                close()
+                return
+            }
+            scope.launch {
+                checking = true
+                problem = null
+                when (val r = com.yiiai.app.settings.VoiceLookup.lookup(settings.apiKey, clean)) {
+                    is com.yiiai.app.settings.VoiceLookup.Result.Found -> {
+                        store.addCustomVoice(r.name, clean)
+                        store.update { it.copy(voiceId = clean) }
+                        Toast.makeText(context, "已添加「${r.name}」", Toast.LENGTH_SHORT).show()
+                        close()
+                    }
+                    is com.yiiai.app.settings.VoiceLookup.Result.NotFound ->
+                        problem = "没有找到这个音色 ID，请检查有没有复制完整。"
+                    is com.yiiai.app.settings.VoiceLookup.Result.Failed ->
+                        problem = "查询失败（${r.message}），请检查网络后重试。"
+                }
+                checking = false
+            }
         }
         AlertDialog(
             onDismissRequest = { close() },
@@ -786,59 +830,32 @@ private fun VoicePage(store: SettingsStore) {
                         value = id,
                         onValueChange = {
                             id = it
-                            found = null
                             problem = null
                         },
                         label = { Text("音色 ID") },
                         placeholder = { Text("从音色库复制") },
                         singleLine = true,
+                        isError = problem != null,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { submit() }),
                         modifier = Modifier.fillMaxWidth(),
                     )
                     when {
-                        checking -> Text("正在查询音色名称…", color = palette.textDim, fontSize = 13.sp)
-                        found != null -> Text("找到音色：$found", color = palette.positive, fontSize = 13.sp)
+                        checking -> Text("正在核对音色 ID…", color = palette.textDim, fontSize = 13.sp)
                         problem != null -> Text(problem!!, color = palette.danger, fontSize = 13.sp)
-                        else -> Text("名称会自动从音色库获取。", color = palette.textDim, fontSize = 12.sp)
+                        else -> Text("粘贴 ID 后点「添加」，名称会自动获取。", color = palette.textDim, fontSize = 12.sp)
                     }
                 }
             },
             confirmButton = {
-                val name = found
-                TextButton(
-                    enabled = id.isNotBlank() && !checking,
-                    onClick = {
-                        when {
-                            name != null -> add(name)
-                            problem != null -> add("")
-                            else -> scope.launch {
-                                checking = true
-                                when (val r = com.yiiai.app.settings.VoiceLookup.lookup(settings.apiKey, id)) {
-                                    is com.yiiai.app.settings.VoiceLookup.Result.Found -> found = r.name
-                                    is com.yiiai.app.settings.VoiceLookup.Result.NotFound ->
-                                        problem = "音色库里没查到这个 ID 的名称，可以检查一下 ID，或者直接添加。"
-                                    is com.yiiai.app.settings.VoiceLookup.Result.Failed ->
-                                        problem = "查询失败（${r.message}），可以稍后再试，或者直接添加。"
-                                }
-                                checking = false
-                            }
-                        }
-                    },
-                ) {
-                    Text(
-                        when {
-                            name != null -> "添加「$name」"
-                            problem != null -> "仍然添加"
-                            else -> "查询并添加"
-                        },
-                    )
+                TextButton(enabled = id.isNotBlank() && !checking, onClick = { submit() }) {
+                    Text(if (checking) "正在添加…" else "添加")
                 }
             },
             dismissButton = { TextButton(onClick = { close() }) { Text("取消") } },
         )
     }
 }
-
 @Composable
 private fun PersonaPage(store: SettingsStore) {
     val palette = LocalYiiPalette.current
@@ -1095,27 +1112,110 @@ private fun AudioPage(store: SettingsStore) {
                 onCheckedChange = { on -> store.update { it.copy(speakerOn = on) } },
             )
         }
-        listOf(24_000 to "24 kHz（省流量）", 48_000 to "48 kHz（最佳音质）").forEach { (rate, label) ->
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(palette.surface)
-                    .clickable { store.update { it.copy(outputSampleRate = rate) } }
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(label, color = palette.text, fontSize = 15.sp)
-                Spacer(Modifier.weight(1f))
-                RadioButton(
-                    selected = settings.outputSampleRate == rate,
-                    onClick = { store.update { it.copy(outputSampleRate = rate) } },
-                )
-            }
-        }
+        Text(
+            "音质档位在「画质与音质」里调。",
+            color = palette.textDim,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(top = 2.dp, start = 4.dp),
+        )
     }
 }
 
+/** 画质与音质：角色声音、屏幕和摄像头分别设置。 */
+@Composable
+private fun QualityPage(store: SettingsStore, live: com.yiiai.app.live.LiveSession?) {
+    val settings by store.state.collectAsStateWithLifecycleCompat()
+    val levels = com.yiiai.app.settings.QualityLevel.entries.map { it to it.label }
+    val voiceLevels = listOf(
+        com.yiiai.app.settings.QualityLevel.Standard to "标准",
+        com.yiiai.app.settings.QualityLevel.Clear to "清晰",
+    )
+    fun change(transform: (com.yiiai.app.settings.AppSettings) -> com.yiiai.app.settings.AppSettings) {
+        store.update(transform)
+        live?.onSettingsChanged()
+    }
+
+    FieldPage {
+        SurfaceCard {
+            SegmentedChoice(
+                title = "角色声音",
+                options = voiceLevels,
+                selected = if (settings.audioQuality == com.yiiai.app.settings.QualityLevel.Clear) {
+                    com.yiiai.app.settings.QualityLevel.Clear
+                } else {
+                    com.yiiai.app.settings.QualityLevel.Standard
+                },
+                onSelect = { level -> change { it.copy(audioQuality = level) } },
+                detail = "${settings.outputSampleRate / 1000} kHz",
+            )
+            RowDivider()
+            SegmentedChoice(
+                title = "屏幕画质",
+                options = levels,
+                selected = settings.screenQuality,
+                onSelect = { level -> change { it.copy(screenQuality = level) } },
+                detail = settings.screenVideo.summary,
+            )
+            RowDivider()
+            SegmentedChoice(
+                title = "摄像头画质",
+                options = levels,
+                selected = settings.cameraQuality,
+                onSelect = { level -> change { it.copy(cameraQuality = level) } },
+                detail = settings.cameraVideo.summary,
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+/** 一行标题 + 一排互斥选项 + 可选的说明。[selected] 为 null 时没有选项高亮。 */
+@Composable
+private fun <T> SegmentedChoice(
+    title: String,
+    options: List<Pair<T, String>>,
+    selected: T?,
+    onSelect: (T) -> Unit,
+    detail: String? = null,
+) {
+    val palette = LocalYiiPalette.current
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 11.dp)) {
+        Text(title, color = palette.text, fontSize = 14.sp)
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 9.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(palette.surfaceRaised)
+                .padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            options.forEach { (value, label) ->
+                val active = selected == value
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (active) palette.accent else androidx.compose.ui.graphics.Color.Transparent)
+                        .clickable { onSelect(value) }
+                        .padding(vertical = 9.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        label,
+                        color = if (active) palette.onAccent() else palette.textDim,
+                        fontSize = 13.sp,
+                        fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+        detail?.let {
+            Text(it, color = palette.textDim, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 8.dp))
+        }
+    }
+}
 @Composable
 private fun AboutPage(store: SettingsStore) {
     val palette = LocalYiiPalette.current
@@ -1244,7 +1344,7 @@ private fun PhoneUsePage() {
         Spacer(Modifier.height(6.dp))
         Text(
             "能做什么：\n" +
-                "· 看一眼：截一张当前屏幕发给模型，用来聊「这件衣服怎么样」这类问题；\n" +
+                "· 看屏幕：你说「你看这个」时开始持续发送屏幕画面，默认约 3 分钟，到点自动停，首页能随时关掉；\n" +
                 "· 读界面：拿到当前页面的文字和按钮；\n" +
                 "· 帮你操作：点按、滑动、输入文字、打开应用、返回或回桌面。",
             color = palette.textDim,
@@ -1254,7 +1354,7 @@ private fun PhoneUsePage() {
         Spacer(Modifier.height(6.dp))
         Text(
             "要注意：\n" +
-                "· 只有你说话或主动要求时才会截图，截图只用于当次对话，不会保存；\n" +
+                "· 只有你要求看的时候才会发送画面，画面只用于当次对话，不会保存；\n" +
                 "· 支付、银行和部分视频 App 禁止截屏，会返回黑图；\n" +
                 "· 系统有时会自动关掉无障碍服务，发现用不了就回来重新打开。",
             color = palette.textDim,

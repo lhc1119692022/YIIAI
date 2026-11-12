@@ -16,6 +16,37 @@ object ForegroundApp {
         cached = null
     }
 
+    /**
+     * 能不能知道「现在前台是哪个应用」：需要无障碍服务，或者「使用情况访问」权限。
+     * 两个都没有时 [current] 永远是 null，不能拿它判断应用有没有打开。
+     */
+    fun canObserve(context: Context): Boolean {
+        if (PhoneUseService.instance != null) return true
+        return hasUsageAccess(context)
+    }
+
+    /**
+     * 「使用情况访问」是否已允许（设置 → 使用情况访问 → YIIAI）。
+     * 没有无障碍服务时，这是唯一能判断「前台是哪个应用」的途径。
+     */
+    fun hasUsageAccess(context: Context): Boolean = runCatching {
+        val ops = context.getSystemService(android.app.AppOpsManager::class.java)
+        ops.unsafeCheckOpNoThrow(
+            android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
+            android.os.Process.myUid(),
+            context.packageName,
+        ) == android.app.AppOpsManager.MODE_ALLOWED
+    }.getOrDefault(false)
+
+    fun openUsageAccessSettings(context: Context) {
+        runCatching {
+            context.startActivity(
+                android.content.Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS)
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }
+    }
+
     fun current(context: Context): String? {
         val now = System.currentTimeMillis()
         // 一秒内复用，避免每帧都查系统。

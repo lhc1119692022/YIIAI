@@ -10,6 +10,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import com.yiiai.app.settings.CameraFacing
+import com.yiiai.app.settings.VideoQuality
 import java.net.URLEncoder
 
 /**
@@ -51,19 +52,39 @@ object LiveProtocol {
         instructions: String,
         visionEnabled: Boolean = false,
         cameraFacing: CameraFacing = CameraFacing.Back,
+        cameraSeconds: Int = 5,
+        companion: Boolean = false,
     ): String {
         val name = personaName.trim()
         val prompt = personaPrompt.trim()
-        val visionPolicy = if (visionEnabled) {
-            "看手机屏幕始终可用：用户说「你看这个」「这个怎么样」或讨论屏幕、当前应用里的内容时，调用 look_at_screen。" +
-                "摄像头视觉也已由用户开启：只有用户明确要你看现实中的周围环境、实物、用户本人或提到摄像头时，才调用 look_at_camera 获取最多 3 帧；" +
-                "摄像头工具结束会自动关闭镜头，不要持续请求，屏幕画面不受影响。" +
+        val screenPolicy =
+            "看手机屏幕始终可用：用户说「你看这个」「这个怎么样」或讨论屏幕、当前应用里的内容时，调用 look_at_screen，" +
+                "之后大约 3 分钟内屏幕画面会持续送到你这里。" +
+                "要看更久（陪用户看视频、带着用户一步步操作）就调用 watch_screen 并给出秒数；" +
+                "时间快到而事情还没做完，就再调用一次 watch_screen 续期，不要等画面断掉。" +
+                "你在帮用户操作手机时，画面不会中途断掉。" +
+                "用户说不用看了，就调用 stop_watching。" +
+                "画面关闭后你会收到一条通知，这之后不要假装还能看到屏幕；需要时重新调用 look_at_screen。" +
+                "能用工具直接完成的事就直接用工具，不要靠看屏幕去找：打开应用用 open_app（不需要先看屏幕，也不要去桌面上找图标），" +
+                "不确定应用名用 list_apps，返回和回桌面用 press_key，按钮上有文字就用 tap_element 按文字点。"
+        val cameraPolicy = if (visionEnabled) {
+            "摄像头视觉也已由用户开启：只有用户明确要你看现实中的周围环境、实物、用户本人或提到摄像头时，才调用 look_at_camera。" +
+                "镜头打开后会连续送大约 $cameraSeconds 秒画面，然后自动关闭；要看一个过程可以用 seconds 指定更久，还没看完就再调用一次续期，" +
+                "用户说不用看了就调用 stop_watching。屏幕画面不受摄像头影响。" +
                 "需要切换时 facing 用 front（前摄）或 back（后摄）；省略时默认使用${cameraFacing.label}。"
         } else {
-            "看手机屏幕始终可用：用户说「你看这个」「这个怎么样」或讨论屏幕、当前应用里的内容时，照常调用 look_at_screen。" +
-                "摄像头视觉当前关闭（这只影响摄像头，不影响看屏幕）：不要调用 look_at_camera，也不要尝试开启摄像头；" +
+            "摄像头视觉当前关闭（这只影响摄像头，不影响看屏幕）：不要调用 look_at_camera，也不要尝试开启摄像头；" +
                 "用户要你看现实中的东西时，告诉用户可在设置中开启「开启视觉」。"
         }
+        val proactivePolicy = if (companion) {
+            "陪伴模式已开启：用户安静一段时间后，你会收到一条「陪伴提示」。它不是用户说的话，不要念出来，也不要提到它；" +
+                "收到后用你自己的人设和语气，自然地找个话头跟用户搭话，一两句就好，说完等对方回应。" +
+                "是搭话，不是催对方开口：不要问「你怎么不说话」「还在吗」。" +
+                "如果用户说过在忙、想安静或让你别说话，就先不要搭话。"
+        } else {
+            ""
+        }
+        val visionPolicy = listOf(screenPolicy, cameraPolicy, proactivePolicy).filter { it.isNotEmpty() }.joinToString("\n")
         val baseInstructions = instructions.trim()
         val instr = (baseInstructions.take((MAX_INSTRUCTION_CHARS - visionPolicy.length - 2).coerceAtLeast(0)) +
             if (baseInstructions.isBlank()) visionPolicy else "\n\n$visionPolicy")
@@ -95,7 +116,7 @@ object LiveProtocol {
         putJsonObject("response") { put("call_ids", kotlinx.serialization.json.JsonArray(listOf(JsonPrimitive(callId)))) }
     }
 
-    fun mediaConfigure(outputSampleRate: Int) = event("media.configure") {
+    fun mediaConfigure(outputSampleRate: Int, video: VideoQuality, serverPlayback: Boolean = false) = event("media.configure") {
         putJsonObject("output_audio") {
             put("format", "pcm16")
             put("sample_rate", outputSampleRate)
@@ -103,14 +124,15 @@ object LiveProtocol {
         putJsonObject("input_audio") {
             put("format", "pcm16")
         }
-        // 屏幕与摄像头画面：长边 1024、JPEG 质量 0.8。
+        // 屏幕与摄像头共用这一份声明，取两路画质档位的外包络（见 QualityPresets.envelope）。
         // 注意服务端要求 jpeg_quality 在 0.1..1 之间，传 80 会被整条 media.configure 拒绝。
         putJsonObject("video") {
-            put("max_long_side", 1024)
-            put("jpeg_quality", 0.8)
-            put("interval_ms", 1000)
+            put("max_long_side", video.maxLongSide.coerceIn(128, 1920))
+            put("jpeg_quality", (video.jpegQuality / 100.0).coerceIn(0.1, 1.0))
+            put("interval_ms", video.intervalMs.coerceIn(200L, 10_000L))
         }
-        put("playback", "client")
+        // client：我们按真实播放进度回执；server：服务端按实时速度自己推进，不看回执。
+        put("playback", if (serverPlayback) "server" else "client")
     }
 
     fun mediaMode() = event("media.mode") { put("binary_protocol", "tagged-v1") }
@@ -129,25 +151,45 @@ object LiveProtocol {
 
     fun micState(enabled: Boolean) = event("mic_state") { put("enabled", enabled) }
 
+    /** 静默告诉模型一条事实（比如「屏幕画面已关闭」），模型不会因此开口。 */
+    fun thinkingAppend(content: String, eventId: String) = event("session.thinking.append") {
+        put("content", content.take(MAX_APPEND_CHARS))
+        put("event_id", eventId)
+    }
+
+    /** 给模型一条可以说出口的内容，用于安静时提醒角色主动开口。 */
+    fun commentaryAppend(content: String, eventId: String) = event("session.commentary.append") {
+        put("content", content.take(MAX_APPEND_CHARS))
+        put("event_id", eventId)
+        put("status", "completed")
+    }
+
+    /*
+     * 播放回执。角色主动开口的回复（不是回应用户某句话）turn_id 是空串，
+     * 实测带着空的 turn_id 回执会被服务端以 invalid_public_request 拒绝，所以为空时不带这个字段。
+     */
     fun chunkCompleted(runId: String, turnId: String, chunkId: String) = event("playback.chunk.completed") {
         put("run_id", runId)
-        put("turn_id", turnId)
+        if (turnId.isNotEmpty()) put("turn_id", turnId)
         put("chunk_id", chunkId)
     }
 
     fun playbackCompleted(runId: String, turnId: String) = event("playback.completed") {
         put("run_id", runId)
-        put("turn_id", turnId)
+        if (turnId.isNotEmpty()) put("turn_id", turnId)
     }
 
     fun playbackStopped(runId: String, turnId: String, playedAudioMs: Long) = event("playback.stopped") {
         put("run_id", runId)
-        put("turn_id", turnId)
+        if (turnId.isNotEmpty()) put("turn_id", turnId)
         put("played_audio_ms", playedAudioMs)
     }
 
     const val MAX_PERSONA_CHARS = 8000
     const val MAX_INSTRUCTION_CHARS = 16000
+
+    /** 单次 append 的内容上限。 */
+    const val MAX_APPEND_CHARS = 2000
 
     /** 单次工具结果最多回传多少字符。 */
     const val MAX_TOOL_OUTPUT_CHARS = 4000

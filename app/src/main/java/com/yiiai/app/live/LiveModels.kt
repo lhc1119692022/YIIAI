@@ -27,6 +27,17 @@ data class CallState(
     val sessionId: String? = null,
     val error: String? = null,
     val notice: String? = null,
+    /** 正在持续看屏幕。 */
+    val watchingScreen: Boolean = false,
+    /** 看屏幕到什么时候自动停（System.currentTimeMillis）。 */
+    val watchEndsAt: Long = 0L,
+    /** YIIAI 自己在前台，画面暂停发送，倒计时也停住。 */
+    val watchPaused: Boolean = false,
+    /** 摄像头正开着。 */
+    val cameraActive: Boolean = false,
+    val cameraEndsAt: Long = 0L,
+    /** 正在用的镜头：前摄 / 后摄。 */
+    val cameraFacing: String = "",
 )
 
 data class AudioLevels(val user: Float = 0f, val assistant: Float = 0f)

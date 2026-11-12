@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -51,9 +52,11 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 
 /**
- * 悬浮球：固定不动的YIIAI头像，外面一圈状态色轮廓。
- * 说话时轮廓像参考项目的 logo 一样不停变形（花瓣状的波动），音量越大波动越大；
- * 安静时收回成正圆，不再上下浮动。
+ * 悬浮球：和桌面图标同一只小鹿，异形、没有底板也没有描边。
+ *
+ * 没人说话时偶尔张望或抖耳朵，动作之间保持安静；有人说话时小动作立刻收起，身后显示声波。
+ * 正在看屏幕或开着摄像头时，旁边亮一颗小灯。
+ * 轻点展开面板，长按挂断，拖动后自动贴边并转头朝屏幕里面看。
  */
 @Composable
 fun OverlayBubbleHost(
@@ -69,8 +72,8 @@ fun OverlayBubbleHost(
         val palette = LocalYiiPalette.current
         val state by live.state.collectAsStateWithLifecycle()
         val levels by live.levels.collectAsStateWithLifecycle()
+        val dockedLeft by OverlayService.dockedLeft.collectAsStateWithLifecycle()
 
-        val speaking = state.assistantSpeaking || state.userSpeaking
         val level = when {
             state.assistantSpeaking -> levels.assistant
             state.userSpeaking -> levels.user
@@ -83,108 +86,129 @@ fun OverlayBubbleHost(
         )
         val connecting = state.phase == CallPhase.Connecting || state.phase == CallPhase.Configuring ||
             state.phase == CallPhase.Reconnecting
-        // 变形幅度：说话时最大，连接时中等，安静聆听时轻微，静音/出错回到正圆。
-        val amplitude by animateFloatAsState(
-            targetValue = when {
-                state.muted || state.phase == CallPhase.Failed -> 0f
-                speaking -> 0.055f + smooth * 0.07f
-                connecting -> 0.045f
-                state.phase == CallPhase.Live -> 0.018f
-                else -> 0f
-            },
-            animationSpec = spring(dampingRatio = 0.6f, stiffness = Spring.StiffnessLow),
-            label = "bubble-amp",
-        )
-        val transition = rememberInfiniteTransition(label = "bubble")
-        val phase by transition.animateFloat(
-            initialValue = 0f,
-            targetValue = 6.2832f,
-            animationSpec = infiniteRepeatable(
-                tween(if (state.assistantSpeaking) 1600 else 3200, easing = LinearEasing),
-                RepeatMode.Restart,
-            ),
-            label = "bubble-phase",
-        )
-
+        val failed = state.phase == CallPhase.Failed
         val color: Color = when {
-            state.phase == CallPhase.Failed -> palette.danger
+            failed -> palette.danger
             state.muted -> palette.orbIdle
             state.assistantSpeaking -> palette.orbAssistant
             state.userSpeaking -> palette.orbUser
             connecting -> palette.accent
             else -> palette.orbHalo
         }
-        val shape = BlobShape(amplitude, phase)
+        val animatedColor by androidx.compose.animation.animateColorAsState(color, label = "bubble-color")
+
+        var pressed by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+        var dragging by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+        var dragLean by androidx.compose.runtime.remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+        // 出现时从小弹到正常大小。
+        val appear = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(0.3f) }
+        androidx.compose.runtime.LaunchedEffect(Unit) {
+            appear.animateTo(1f, spring(dampingRatio = 0.42f, stiffness = Spring.StiffnessLow))
+        }
+        val press by animateFloatAsState(
+            targetValue = if (pressed || dragging) 0.86f else 1f,
+            animationSpec = spring(dampingRatio = 0.4f, stiffness = Spring.StiffnessMedium),
+            label = "bubble-press",
+        )
+        // 松手后目标回到 0，弹簧欠阻尼，所以会左右晃两下才停。
+        val lean by animateFloatAsState(
+            targetValue = if (dragging) dragLean else 0f,
+            animationSpec = spring(dampingRatio = 0.28f, stiffness = Spring.StiffnessLow),
+            label = "bubble-lean",
+        )
+        val eyes = when {
+            failed || state.muted -> deerEyesFor(state)
+            dragging -> com.yiiai.app.ui.DeerEyes.Open
+            state.assistantSpeaking || state.userSpeaking -> deerEyesFor(state)
+            // 正在看屏幕或摄像头：睁着眼。
+            state.watchingScreen || state.cameraActive -> com.yiiai.app.ui.DeerEyes.Open
+            else -> deerEyesFor(state)
+        }
 
         Box(
             Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
-                    detectTapGestures(onTap = { onTap() }, onLongPress = { onLongPress() })
+                    detectTapGestures(
+                        onPress = {
+                            pressed = true
+                            tryAwaitRelease()
+                            pressed = false
+                        },
+                        onTap = { onTap() },
+                        onLongPress = { onLongPress() },
+                    )
                 }
                 .pointerInput(Unit) {
                     detectDragGestures(
-                        onDragEnd = { onDragEnd() },
-                        onDragCancel = { onDragEnd() },
+                        onDragStart = { dragging = true },
+                        onDragEnd = {
+                            dragging = false
+                            dragLean = 0f
+                            onDragEnd()
+                        },
+                        onDragCancel = {
+                            dragging = false
+                            dragLean = 0f
+                            onDragEnd()
+                        },
                     ) { change, drag ->
                         change.consume()
+                        // 顺着拖动方向歪头，做一点平滑免得抖。
+                        dragLean = (dragLean * 0.75f + drag.x * 0.9f).coerceIn(-22f, 22f)
                         onDrag(drag.x, drag.y)
                     }
                 },
             contentAlignment = Alignment.Center,
         ) {
-            Canvas(Modifier.fillMaxSize()) {
-                val c = center
-                // 外圈柔光
-                val glowR = size.minDimension * 0.50f
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(color.copy(alpha = 0.45f + smooth * 0.25f), Color.Transparent),
-                        center = c,
-                        radius = glowR,
-                    ),
-                    radius = glowR,
-                    center = c,
+            com.yiiai.app.ui.DeerFloat(
+                eyes = eyes,
+                glow = animatedColor,
+                level = smooth,
+                energy = if (state.muted || failed) 0f else 1f,
+                earMood = when {
+                    failed -> -16f
+                    state.muted -> -12f
+                    dragging -> 12f
+                    state.userSpeaking || state.watchingScreen || state.cameraActive -> 9f
+                    else -> 0f
+                },
+                faceRight = dockedLeft,
+                lean = lean,
+                scale = appear.value * press,
+                // 通话中、没人说话、也没人碰它：这时才做自己的小动作。
+                idle = state.phase == CallPhase.Live && !state.muted && !state.assistantSpeaking &&
+                    !state.userSpeaking && !dragging && !pressed,
+                stateBubble = when {
+                    failed -> "!"
+                    state.phase == CallPhase.Reconnecting -> "重连"
+                    connecting -> "…"
+                    else -> null
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+            // 正在看：角上一颗会呼吸的小灯。摄像头用红色，屏幕用聆听色。
+            if (state.cameraActive || state.watchingScreen) {
+                val lamp = if (state.cameraActive) palette.danger else palette.orbUser
+                val glowAlpha by rememberInfiniteTransition(label = "bubble-lamp").animateFloat(
+                    initialValue = 0.45f,
+                    targetValue = 1f,
+                    animationSpec = infiniteRepeatable(tween(800), RepeatMode.Reverse),
+                    label = "bubble-lamp-alpha",
                 )
-                // 状态色轮廓：和头像同一个变形轮廓，略大一圈
-                val ring = blobPath(size.minDimension * 0.42f, c, amplitude, phase)
-                drawPath(ring, color, style = Stroke(width = 3.dp.toPx()))
-            }
-            Box(
-                Modifier
-                    .fillMaxSize(0.76f)
-                    .clip(shape),
-            ) {
-                DeerMark(
-                    modifier = Modifier.fillMaxSize(),
-                    glow = color,
-                    withTile = true,
-                    eyes = deerEyesFor(state),
-                )
+                Canvas(Modifier.fillMaxSize()) {
+                    val r = size.minDimension * 0.055f
+                    // 靠屏幕边缘的那一侧、鹿角旁边；气泡在另一侧，不会挡住。
+                    val at = Offset(
+                        if (dockedLeft) size.width * 0.17f else size.width * 0.83f,
+                        size.height * 0.40f,
+                    )
+                    drawCircle(Color.White, radius = r * 1.45f, center = at)
+                    drawCircle(lamp.copy(alpha = if (state.watchPaused && !state.cameraActive) 0.35f else glowAlpha), radius = r, center = at)
+                }
             }
         }
     }
-}
-
-/** 花瓣状波动的圆：r(θ) = R · (1 - a · (0.5 + 0.5·sin(7θ + φ)))。a = 0 时就是正圆。 */
-private fun blobPath(radius: Float, center: Offset, amplitude: Float, phase: Float): Path {
-    val path = Path()
-    val steps = 96
-    for (i in 0..steps) {
-        val t = i / steps.toFloat() * 6.2832f
-        val wobble = 0.5f + 0.5f * sin(7f * t + phase) * 0.7f + 0.3f * sin(3f * t - phase * 2f) * 0.5f
-        val r = radius * (1f - amplitude * wobble)
-        val x = center.x + r * cos(t)
-        val y = center.y + r * sin(t)
-        if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
-    }
-    path.close()
-    return path
-}
-
-private class BlobShape(private val amplitude: Float, private val phase: Float) : Shape {
-    override fun createOutline(size: Size, layoutDirection: LayoutDirection, density: Density): Outline =
-        Outline.Generic(blobPath(size.minDimension / 2f, Offset(size.width / 2f, size.height / 2f), amplitude, phase))
 }
 /** 收起的灵动岛：顶部正中的一颗黑色胶囊，头像 + 名字 + 状态 + 音量条，点一下展开面板。 */
 @Composable
@@ -250,6 +274,9 @@ fun OverlayPanelHost(
             onHangup = onHangup,
             onOpen = onOpenApp,
             modifier = Modifier.fillMaxWidth(),
+            onStopLooking = {
+                if (state.cameraActive) live.stopCameraByUser() else live.stopWatchingByUser()
+            },
         )
     }
 }

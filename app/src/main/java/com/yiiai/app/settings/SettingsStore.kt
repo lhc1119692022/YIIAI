@@ -20,6 +20,24 @@ enum class CameraFacing(val preferenceKey: String, val label: String) {
     }
 }
 
+/**
+ * 陪伴模式：用户安静下来之后，角色隔多久主动搭一次话。
+ * 每次都在 [minSeconds]..[maxSeconds] 之间随机取一个时间，避免像闹钟一样准点。
+ */
+enum class CompanionMode(val key: String, val label: String, val minSeconds: Int, val maxSeconds: Int) {
+    Off("off", "关闭", 0, 0),
+    Standard("standard", "标准陪伴", 30, 120),
+    Warm("warm", "热情陪伴", 10, 45);
+
+    companion object {
+        fun of(key: String?): CompanionMode = entries.firstOrNull { it.key == key } ?: Off
+    }
+}
+
+/** 摄像头单次观看时长的范围（秒）。 */
+const val CAMERA_LOOK_MIN_SECONDS = 3
+const val CAMERA_LOOK_MAX_SECONDS = 120
+
 /** 音色库页面，用于试听和取音色 ID。 */
 const val VOICE_LIBRARY_URL = "https://create.moss.cn/voice/library"
 
@@ -129,8 +147,16 @@ data class AppSettings(
      */
     val sharedMemory: Boolean = true,
     val themeModeKey: String = "light",
-    /** 下行 PCM 采样率：24000 省流量，48000 音质最好。 */
-    val outputSampleRate: Int = 24_000,
+    /** 音质档位：决定角色说话声音的下行采样率。 */
+    val audioQuality: QualityLevel = QualityLevel.Standard,
+    /** 屏幕画面档位：长边、JPEG 质量、帧率。 */
+    val screenQuality: QualityLevel = QualityLevel.Standard,
+    /** 摄像头画面档位：长边、JPEG 质量、帧率。 */
+    val cameraQuality: QualityLevel = QualityLevel.Standard,
+    /** 模型没有指定时，摄像头每次看多少秒。 */
+    val cameraLookSeconds: Int = 5,
+    /** 陪伴模式：用户安静时角色主动搭话的积极程度。默认关闭。 */
+    val companion: CompanionMode = CompanionMode.Off,
     val speakerOn: Boolean = true,
     /** 本机安装生成的稳定设备 ID。 */
     val userId: String = "",
@@ -138,8 +164,11 @@ data class AppSettings(
     val customVoices: List<VoiceOption> = emptyList(),
     /** 首次启动的权限引导是否已经走完。 */
     val onboardingDone: Boolean = false,
-    /** API Key 是否通过过连接验证（只在本机记录，换 Key 会重置）。 */
-    val apiKeyVerified: Boolean = false,
+    /**
+     * 已保存的 Key 后来被服务端拒绝（401/403）。
+     * Key 只有连接成功才会保存，所以「有 Key」就等于「连接过」；这个标记只记录它之后失效了。
+     */
+    val apiKeyRejected: Boolean = false,
     /** 无障碍服务是否曾经成功连上过。用于「被系统关掉」的提醒。 */
     val phoneUseEverReady: Boolean = false,
     /** 允许模型按需短暂调用摄像头。默认关闭。 */
@@ -153,6 +182,11 @@ data class AppSettings(
     val personaName: String get() = activePersona.name
     val personaPrompt: String get() = activePersona.prompt
     val instructions: String get() = activePersona.instructions
+
+    /** 下行 PCM 采样率，由音质档位决定。 */
+    val outputSampleRate: Int get() = QualityPresets.audioSampleRate(audioQuality)
+    val screenVideo: VideoQuality get() = QualityPresets.screen(screenQuality)
+    val cameraVideo: VideoQuality get() = QualityPresets.camera(cameraQuality)
 
     /** 实际作为 MOSS `user` 参数的值：决定长期记忆的归属。 */
     fun memoryUser(): String =
@@ -173,6 +207,14 @@ class SettingsStore(context: Context) {
         val next = transform(_state.value)
         save(next)
         _state.value = next
+    }
+
+    /** 保存一个刚刚连接成功的 Key。Key 只从这里写入，所以存着的 Key 一定连接成功过。 */
+    fun saveVerifiedApiKey(key: String) = update { it.copy(apiKey = key.trim(), apiKeyRejected = false) }
+
+    /** 通话握手的结果：被拒绝（401/403）记为失效，连上了就清掉。 */
+    fun markApiKeyRejected(rejected: Boolean) {
+        if (current.apiKeyRejected != rejected) update { it.copy(apiKeyRejected = rejected) }
     }
 
     fun addCustomVoice(label: String, id: String) {
@@ -240,6 +282,9 @@ class SettingsStore(context: Context) {
         val voices = (Voices.builtIn + custom).map { it.id }
         // 旧版内置的热门音色已经下线，存着的若不在列表里就退回默认。
         val voiceId = prefs.getString(K_VOICE, null)?.takeIf { it in voices } ?: d.voiceId
+        // 旧版只有一个「采样率」设置：48 kHz 对应现在的清晰，其余按标准。
+        val audioQuality = prefs.getString(K_Q_AUDIO, null)?.let { QualityLevel.of(it) }
+            ?: if (prefs.getInt(K_RATE, 0) == 48_000) QualityLevel.Clear else d.audioQuality
         return AppSettings(
             apiKey = prefs.getString(K_API_KEY, null)?.let { SecretBox.decrypt(it) }.orEmpty(),
             voiceId = voiceId,
@@ -247,12 +292,17 @@ class SettingsStore(context: Context) {
             activePersonaId = activeId,
             sharedMemory = prefs.getBoolean(K_SHARED_MEMORY, d.sharedMemory),
             themeModeKey = prefs.getString(K_THEME, null) ?: d.themeModeKey,
-            outputSampleRate = prefs.getInt(K_RATE, d.outputSampleRate),
+            audioQuality = audioQuality,
+            screenQuality = QualityLevel.of(prefs.getString(K_Q_SCREEN, null)),
+            cameraQuality = QualityLevel.of(prefs.getString(K_Q_CAMERA, null)),
+            cameraLookSeconds = prefs.getInt(K_CAMERA_SECONDS, d.cameraLookSeconds)
+                .coerceIn(CAMERA_LOOK_MIN_SECONDS, CAMERA_LOOK_MAX_SECONDS),
+            companion = CompanionMode.of(prefs.getString(K_COMPANION, null)),
             speakerOn = prefs.getBoolean(K_SPEAKER, d.speakerOn),
             userId = userId,
             customVoices = custom,
             onboardingDone = prefs.getBoolean(K_ONBOARDING, false),
-            apiKeyVerified = prefs.getBoolean(K_API_KEY_OK, false),
+            apiKeyRejected = prefs.getBoolean(K_API_KEY_REJECTED, false),
             phoneUseEverReady = prefs.getBoolean(K_PHONE_READY, false),
             visionEnabled = prefs.getBoolean(K_VISION_ENABLED, d.visionEnabled),
             cameraFacing = CameraFacing.fromPreferenceKey(prefs.getString(K_CAMERA_FACING, d.cameraFacing.preferenceKey)),
@@ -313,10 +363,14 @@ class SettingsStore(context: Context) {
             putString(K_ACTIVE_PERSONA, s.activePersonaId)
             putBoolean(K_SHARED_MEMORY, s.sharedMemory)
             putString(K_THEME, s.themeModeKey)
-            putInt(K_RATE, s.outputSampleRate)
+            putString(K_Q_AUDIO, s.audioQuality.key)
+            putString(K_Q_SCREEN, s.screenQuality.key)
+            putString(K_Q_CAMERA, s.cameraQuality.key)
+            putInt(K_CAMERA_SECONDS, s.cameraLookSeconds)
+            putString(K_COMPANION, s.companion.key)
             putBoolean(K_SPEAKER, s.speakerOn)
             putBoolean(K_ONBOARDING, s.onboardingDone)
-            putBoolean(K_API_KEY_OK, s.apiKeyVerified)
+            putBoolean(K_API_KEY_REJECTED, s.apiKeyRejected && s.apiKey.isNotBlank())
             putBoolean(K_PHONE_READY, s.phoneUseEverReady)
             putBoolean(K_VISION_ENABLED, s.visionEnabled)
             putString(K_CAMERA_FACING, s.cameraFacing.preferenceKey)
@@ -344,12 +398,18 @@ class SettingsStore(context: Context) {
         const val K_INSTRUCTIONS = "instructions"
         const val K_SHARED_MEMORY = "shared_memory"
         const val K_THEME = "theme_mode"
+        /** 旧版的下行采样率，只读，用于迁移到音质档位。 */
         const val K_RATE = "output_sample_rate"
+        const val K_Q_AUDIO = "quality_audio"
+        const val K_Q_SCREEN = "quality_screen"
+        const val K_Q_CAMERA = "quality_camera"
+        const val K_CAMERA_SECONDS = "camera_look_seconds"
+        const val K_COMPANION = "companion_mode"
         const val K_SPEAKER = "speaker_on"
         const val K_USER_ID = "user_id"
         const val K_CUSTOM_VOICES = "custom_voices"
         const val K_ONBOARDING = "onboarding_done"
-        const val K_API_KEY_OK = "api_key_verified"
+        const val K_API_KEY_REJECTED = "api_key_rejected"
         const val K_PHONE_READY = "phone_use_ever_ready"
         const val K_VISION_ENABLED = "vision_enabled"
         const val K_CAMERA_FACING = "camera_facing"

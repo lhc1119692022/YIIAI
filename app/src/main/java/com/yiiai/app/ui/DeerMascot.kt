@@ -13,6 +13,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.CornerRadius
@@ -51,23 +52,23 @@ object DeerColors {
     val earOnLight = Color(0xFFDDBB9E)
 }
 
-private fun svg(d: String): Path = PathParser().parsePathString(d).toPath()
+internal fun svg(d: String): Path = PathParser().parsePathString(d).toPath()
 
-private val AntlerLeft = svg(
+internal val AntlerLeft = svg(
     "M262,176 C252,140 246,112 252,86 C256,70 276,70 278,88 C280,104 276,122 282,140 " +
         "C290,124 300,116 312,118 C326,122 322,140 310,150 C300,160 294,170 292,182 Z",
 )
-private val AntlerRight = svg(
+internal val AntlerRight = svg(
     "M346,184 C350,150 360,124 376,104 C386,92 404,100 398,116 C392,130 382,142 380,156 " +
         "C392,148 406,148 414,156 C422,168 410,180 396,184 C384,188 374,192 366,198 Z",
 )
-private val EarLeft = svg(
+internal val EarLeft = svg(
     "M232,214 C196,180 150,168 118,180 C104,186 106,204 124,214 C152,230 194,236 228,236 Z",
 )
-private val EarRight = svg(
+internal val EarRight = svg(
     "M386,214 C420,188 460,180 488,188 C502,194 500,212 484,220 C458,234 420,240 388,238 Z",
 )
-private val Head = svg(
+internal val Head = svg(
     "M300,168 C384,168 436,226 436,300 C436,372 390,428 322,440 C282,447 252,436 222,424 " +
         "C186,410 138,404 112,380 C90,360 96,326 126,312 C158,298 186,282 206,250 " +
         "C228,206 252,168 300,168 Z",
@@ -77,12 +78,17 @@ private val Head = svg(
 private const val VISUAL_SHIFT_X = 34f
 private const val VISUAL_SHIFT_Y = 30f
 
-private val EarLeftRoot = Offset(230f, 225f)
-private val EarRightRoot = Offset(388f, 226f)
-private val AntlerRoot = Offset(320f, 185f)
+internal val EarLeftRoot = Offset(230f, 225f)
+internal val EarRightRoot = Offset(388f, 226f)
+internal val AntlerRoot = Offset(320f, 185f)
 
 /** 眼睛：状态只改这里。 */
-enum class DeerEyes { Closed, Open, Happy, Muted, Error }
+enum class DeerEyes {
+    Closed, Open, Happy, Muted, Error,
+
+    /** 用力闭紧的「> <」：打哈欠、伸懒腰时用。 */
+    Squeeze,
+}
 
 private val EyeClosed = listOf(
     svg("M236,286 C246,306 270,306 280,288"),
@@ -95,6 +101,10 @@ private val EyeHappy = listOf(
 private val EyeMuted = listOf(
     svg("M238,294 L278,294"),
     svg("M320,288 L356,288"),
+)
+private val EyeSqueeze = listOf(
+    svg("M242,277 L274,292 L242,307"),
+    svg("M356,271 L324,286 L356,301"),
 )
 private val EyeError = listOf(
     svg("M244,276 L272,304"), svg("M272,276 L244,304"),
@@ -118,7 +128,7 @@ fun OrbMode.toDeerEyes(): DeerEyes = when (this) {
     OrbMode.Error -> DeerEyes.Error
 }
 
-private fun DrawScope.drawDeerHead(
+internal fun DrawScope.drawDeerHead(
     body: Color,
     ear: Color,
     antler: Color,
@@ -128,6 +138,10 @@ private fun DrawScope.drawDeerHead(
     earAngle: Float = 0f,
     antlerAngle: Float = 0f,
     blink: Float = 1f,
+    /** 睁眼时眼珠左右看：-1 最左，1 最右。 */
+    look: Float = 0f,
+    /** 嘴张开的程度，0 = 没有嘴（和图标一致），1 = 打哈欠张到最大。 */
+    mouth: Float = 0f,
 ) {
     rotate(antlerAngle, pivot = AntlerRoot) {
         drawPath(AntlerLeft, antler)
@@ -150,11 +164,35 @@ private fun DrawScope.drawDeerHead(
         DeerEyes.Happy -> EyeHappy.forEach { drawPath(it, ink, style = stroke) }
         DeerEyes.Muted -> EyeMuted.forEach { drawPath(it, ink, style = stroke) }
         DeerEyes.Error -> EyeError.forEach { drawPath(it, ink, style = stroke) }
+        DeerEyes.Squeeze -> EyeSqueeze.forEach {
+            drawPath(it, ink, style = Stroke(width = 13f * lineScale, cap = StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
+        }
         DeerEyes.Open -> {
             val rx = 10f * lineScale
             val ry = 16f * lineScale * blink
-            drawOval(ink, Offset(258f - rx, 290f - ry), Size(rx * 2, ry * 2))
-            drawOval(ink, Offset(338f - rx, 284f - ry), Size(rx * 2, ry * 2))
+            val dx = look.coerceIn(-1f, 1f) * 9f
+            drawOval(ink, Offset(258f + dx - rx, 290f - ry), Size(rx * 2, ry * 2))
+            drawOval(ink, Offset(338f + dx - rx, 284f - ry), Size(rx * 2, ry * 2))
+        }
+    }
+
+    // 嘴：平时不画；打哈欠时在口鼻下方张开，里面一小块舌头。
+    if (mouth > 0.02f) {
+        val m = mouth.coerceIn(0f, 1f)
+        val center = Offset(206f, 372f)
+        val rx = (8f + 12f * m) * (0.75f + 0.25f * lineScale)
+        val ry = (4f + 20f * m) * (0.75f + 0.25f * lineScale)
+        rotate(18f, pivot = center) {
+            drawOval(ink, Offset(center.x - rx, center.y - ry), Size(rx * 2, ry * 2))
+            if (m > 0.35f) {
+                val tx = rx * 0.62f
+                val ty = ry * 0.42f
+                drawOval(
+                    Color(0xFFE58B7B),
+                    Offset(center.x - tx, center.y + ry * 0.30f - ty),
+                    Size(tx * 2, ty * 2),
+                )
+            }
         }
     }
 }
